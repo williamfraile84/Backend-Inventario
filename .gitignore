@@ -1,0 +1,67 @@
+# ==============================================================================
+# GITIGNORE - BACKEND (Python / FastAPI / SQLite)
+# ==============================================================================
+
+# Bytecode y cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Entornos virtuales
+.venv/
+venv/
+venv*/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Variables de entorno y secretos (protege credenciales, mantiene el ejemplo)
+.env
+.env.*
+!.env.example
+
+# Bases de datos SQLite (incluye archivos temporales WAL y SHM)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Almacenamiento local de archivos, facturas subidas y reportes
+storage/*
+!storage/**/.gitkeep
+temp/
+exports/
+
+# Modelos pesados de Inteligencia Artificial y OCR (PP-OCRv4 ONNX, PyTorch, etc.)
+models/
+models_ocr/*
+!models_ocr/.gitkeep
+*.onnx
+*.pt
+*.pth
+*.bin
+*.weights
+
+# Pruebas y cobertura de código
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Logs y depuración
+logs/
+*.log
+
+# Archivos de configuración de editores y SO
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.sw?
+.DS_Store
+Thumbs.db
