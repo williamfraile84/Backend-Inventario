@@ -26,3 +26,9 @@ def setup_logging():
     logger = logging.getLogger("inventario_fruver")
     logger.info("Logging centralizado estructurado inicializado exitosamente.")
     return logger
+
+
+def get_logger(name: str = "inventario_fruver") -> logging.Logger:
+    """Retorna un logger configurado para el módulo."""
+    return logging.getLogger(name)
+

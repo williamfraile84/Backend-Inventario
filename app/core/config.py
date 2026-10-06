@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 15
     VISION_PROVIDER: str = "auto"
     GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.8-flash"
     OCR_MAX_IMAGE_DIMENSION: int = 1600
     OCR_USE_SERVER_MODEL: bool = False
     OCR_REC_MODEL_PATH: Optional[str] = None
@@ -108,6 +109,9 @@ class Settings(BaseSettings):
     OCR_REC_BATCH_NUM: int = 16
     OCR_ENABLE_PERSPECTIVE_WARP: bool = True
     CONFIDENCE_FALLBACK_THRESHOLD: float = 0.70
+    DIAN_RECEPTOR_NIT: str = "40327379"
+    DIAN_PORTAL_TIMEOUT_SECONDS: int = 25
+    DIAN_HEADLESS_BROWSER: bool = True
 
     @property
     def effective_database_url(self) -> str:

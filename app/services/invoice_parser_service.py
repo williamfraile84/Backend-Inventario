@@ -357,20 +357,20 @@ class XMLInvoiceEngine(BaseVisionEngine):
 
 
 class GeminiVisionEngine(BaseVisionEngine):
-    """Motor multimodal de visión profunda vía Google Gemini API (Nube opcional)."""
     """
-    Motor multimodal de visión profunda vía Google Gemini API (SOTA 2025-2026).
+    Motor multimodal de visión profunda vía Google Gemini API.
     Utiliza response_schema (Structured Outputs) con tipado estricto garantizado:
-    - 0% errores ortográficos ('Caufe' -> 'Café Sello Rojo 212g').
-    - 100% captura de renglones de mercancía (sin truncar tablas ni líneas partidas).
-    - Cero confusión de metadatos (términos de pago, direcciones o retenciones) como productos.
-    - Cero cálculo contable delegado al modelo: los importes netos, impuestos y márgenes
-      se calculan de manera determinista en Python (pricing_engine.py).
+    - Extracción semántica de alta fidelidad con corrección de errores ópticos.
+    - Captura exhaustiva de renglones de mercancía.
+    - Cero confusión entre metadatos documentales y productos facturados.
+    - Cálculo contable determinista delegado a Python (pricing_engine.py).
     """
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model_name: Optional[str] = None):
         self.api_key = api_key
-        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.api_key}"
-        self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+        raw_model = (model_name or getattr(settings, "GEMINI_MODEL", None) or "gemini-3.8-flash").strip()
+        if raw_model.startswith("models/"):
+            raw_model = raw_model[len("models/"):]
+        self.model_name = raw_model
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
 
     async def extract_invoice(self, file_bytes: bytes, filename: str = "") -> Dict[str, Any]:
@@ -382,52 +382,76 @@ class GeminiVisionEngine(BaseVisionEngine):
             mime_type = "image/webp"
 
         system_instruction = (
-            "Eres un auditor contable experto en facturas comerciales, licores, fruver, abarrotes y POS de Colombia. "
-            "Extrae TODOS los datos en formato JSON estricto con campos: proveedor, nit, numero_factura, fecha, subtotal, total, items. "
-            "Para cada item incluye: codigo, descripcion, cantidad, unidad, precio_unitario, subtotal, total, impuestos. "
-            "En el arreglo de 'impuestos' de cada item, detecta con precisión los tributos colombianos: "
-            "1) IVA: 'IVA 19%', 'IVA 5%' o 'Exento' con su tasa (ej. 19 o 5). "
-            "2) Licores y Vinos: Impuesto al Consumo Ad-Valorem ('IPO+ADV 25%' para licores destilados, o 'IPO+ADV 20%' para vinos/aperitivos con tasa 25 o 20). Si hay impuesto específico en pesos, incluye 'valor_fijo'. "
-            "3) Ultraprocesados: ICUI ('ICUI 20%', 'ICUI 15%', 'ICUI 10%'). "
-            "4) Impoconsumo: INC ('INC 8%'). "
-            "5) Bebidas azucaradas: IBUA (tasa o valor_fijo en pesos). "
-            "Importante: Los licores suelen combinar IVA 5% + IPO+ADV 25% simultáneamente. Extrae ambos si la factura los discrimina."
-            "Eres un auditor contable experto en facturas comerciales y de distribución en Colombia (Fruver, abarrotes, lácteos, licores, carnes, aseo).\n"
-            "Tu tarea es extraer con máxima fidelidad TODOS los renglones de mercancía facturada presentes en la imagen.\n\n"
+            "Eres un auditor contable experto en extracción y digitalización de facturas comerciales, recibos y documentos de compra para comercios (Fruver, abarrotes, retail, distribuidoras y afines en Colombia).\n\n"
+            "Tu misión es extraer de manera exhaustiva y estructurada la totalidad de los datos del documento con máxima fidelidad óptica y contable.\n\n"
             "REGLAS CRÍTICAS:\n"
-            "1. EXTRAER TODOS LOS PRODUCTOS: Extrae cada uno de los renglones facturados. No resumas, no omitas ítems intermedios ni finales.\n"
-            "2. DESCRIPCIONES COMPLETAS Y PRECISAS: Si el nombre del producto ocupa 2 líneas de texto, únelas en un solo nombre claro (ej. 'Spaghetti Comarrico Clásica 454g', 'Galleta Jumbo Maní 24p x 12und'). Corrige cualquier error óptico o tipográfico evidente.\n"
-            "3. NO CONFUNDIR METADATOS CON PRODUCTOS: Términos de pago ('CONTADO', 'CREDITO', 'TRANSFERENCIA'), códigos de cliente ('CR173815'), nombres de sucursales o almacenes ('FRUVER YANUBA', 'FRUVERYANUBA', 'FRUVER DEL YAKIBA'), números de resolución DIAN, cuentas bancarias, o retenciones de pie de página ('R.ICA', 'RETEFUENTE', 'VLR BRUTO', 'TOTAL NETO') NUNCA son productos.\n"
-            "4. PRECIO UNITARIO Y TOTAL: 'precio_unitario' es el costo unitario de compra por unidad/empaque antes de impuestos. 'total' es el valor de compra neto total del renglón.\n"
-            "5. TRIBUTOS COLOMBIANOS: Identifica si cada renglón tiene IVA (19% o 5%), ICUI (Ultraprocesados: 20%, 15%, 10%), INC (Impoconsumo 8%), IPO (Licores 25% o 20%), o es Exento (0%)."
+            "1. EXTRACCIÓN EXHAUSTIVA DE PRODUCTOS: Extrae cada uno de los renglones facturados sin omitir ni resumir ninguno. No excluyas artículos del inicio, intermedios ni del final.\n"
+            "2. DESCRIPCIONES Y CONSOLIDACIÓN: Si la descripción de un producto ocupa varias líneas en la tabla, únelas en un único texto continuo y claro. Preserva marca, peso, presentación comercial o gramaje si están indicados en la línea. Corrige erratas ópticas evidentes.\n"
+            "3. DISTINCIÓN ESTRICTA ENTRE METADATOS Y PRODUCTOS:\n"
+            "   - NUNCA incluyas como producto renglones con información de cabecera del emisor o comprador (nombres de almacenes, sucursales, clientes, códigos internos de cliente o vendedor).\n"
+            "   - NUNCA incluyas términos o condiciones de pago (CONTADO, CRÉDITO, TRANSFERENCIA, CHEQUE).\n"
+            "   - NUNCA incluyas resoluciones DIAN, números de cuenta bancaria o leyendas legales.\n"
+            "   - NUNCA incluyas subtotales, totales ni retenciones de pie de página (ReteFuente, ReteICA, ReteIVA) como ítems de compra.\n"
+            "4. CANTIDADES Y VALORES NUMÉRICOS:\n"
+            "   - 'cantidad': Cantidad física adquirida (número positivo).\n"
+            "   - 'precio_unitario': Precio o costo unitario de compra antes de impuestos.\n"
+            "   - 'descuento': Valor de descuento en el renglón si aplica (0 si no hay).\n"
+            "   - 'subtotal': Subtotal antes de impuestos del renglón (cantidad * precio_unitario - descuento).\n"
+            "   - 'total': Importe total neto del renglón.\n"
+            "5. TRIBUTOS COLOMBIANOS:\n"
+            "   - Identifica con precisión si cada renglón tiene IVA (19%, 5%, 0% o Exento), Impoconsumo INC (8%), Impuesto a Ultraprocesados ICUI (10%, 15%, 20%), o Impuesto al Consumo de Licores IPO (20%, 25%).\n"
+            "   - Especifica 'impuesto_nombre' e 'impuesto_tasa' por renglón.\n"
+            "6. DATOS DEL DOCUMENTO:\n"
+            "   - 'proveedor': Razón social o nombre comercial del proveedor emisor.\n"
+            "   - 'nit': NIT o identificación tributaria del proveedor.\n"
+            "   - 'numero_factura': Prefijo y consecutivo de la factura.\n"
+            "   - 'fecha': Fecha de emisión en formato AAAA-MM-DD.\n"
+            "   - 'condicion_pago': Condición comercial de pago (Contado, Crédito, etc.).\n"
+            "   - 'subtotal', 'descuento', 'total_impuestos', 'total': Valores consolidados de la factura.\n"
+            "   - 'iva_incluido_global': true si se indica explícitamente que los precios unitarios ya incluyen IVA, false en caso contrario."
         )
 
         response_schema = {
             "type": "OBJECT",
             "properties": {
-                "proveedor": {"type": "STRING", "description": "Razón social del proveedor o distribuidor"},
+                "proveedor": {"type": "STRING", "description": "Razón social del proveedor o distribuidor emisor"},
                 "nit": {"type": "STRING", "description": "NIT o identificación tributaria del proveedor"},
                 "numero_factura": {"type": "STRING", "description": "Número o consecutivo de la factura"},
-                "fecha": {"type": "STRING", "description": "Fecha de emisión (AAAA-MM-DD)"},
+                "fecha": {"type": "STRING", "description": "Fecha de emisión en formato AAAA-MM-DD"},
                 "condicion_pago": {"type": "STRING", "description": "Condición de pago: Contado, Crédito, etc."},
-                "subtotal": {"type": "NUMBER", "description": "Subtotal antes de impuestos"},
+                "subtotal": {"type": "NUMBER", "description": "Subtotal de la factura antes de impuestos"},
+                "descuento": {"type": "NUMBER", "description": "Descuento comercial global de la factura si aplica"},
                 "total_impuestos": {"type": "NUMBER", "description": "Total de impuestos facturados"},
                 "total": {"type": "NUMBER", "description": "Total neto a pagar de la factura"},
+                "iva_incluido_global": {"type": "BOOLEAN", "description": "True si los precios unitarios ya incluyen IVA"},
                 "items": {
                     "type": "ARRAY",
-                    "description": "Lista completa de todos los productos y renglones de mercancía facturada",
+                    "description": "Lista de todos los productos y renglones de mercancía facturada",
                     "items": {
                         "type": "OBJECT",
                         "properties": {
-                            "codigo": {"type": "STRING", "description": "Código de barras EAN o referencia interna del producto"},
+                            "codigo": {"type": "STRING", "description": "Código de barras, PLU o referencia interna del producto"},
                             "descripcion": {"type": "STRING", "description": "Nombre comercial completo del producto con marca y peso"},
                             "cantidad": {"type": "NUMBER", "description": "Cantidad física facturada"},
-                            "unidad": {"type": "STRING", "description": "Unidad de medida: Und, Paca, Display, Caja, Bolsa, Kg, Gr, etc."},
+                            "unidad": {"type": "STRING", "description": "Unidad de medida: Und, Kg, Gr, Paca, Display, Caja, Bolsa, etc."},
                             "precio_unitario": {"type": "NUMBER", "description": "Precio unitario antes de impuestos"},
-                            "descuento": {"type": "NUMBER", "description": "Descuento en porcentaje o valor"},
-                            "subtotal": {"type": "NUMBER", "description": "Subtotal del renglón"},
-                            "impuesto_nombre": {"type": "STRING", "description": "Nombre del impuesto: IVA, ICUI, INC, IPO, Exento"},
-                            "impuesto_tasa": {"type": "NUMBER", "description": "Porcentaje de impuesto (ej. 19, 5, 0, 10, 15, 20, 25)"},
+                            "descuento": {"type": "NUMBER", "description": "Descuento en porcentaje o valor del renglón"},
+                            "subtotal": {"type": "NUMBER", "description": "Subtotal del renglón antes de impuestos"},
+                            "impuesto_nombre": {"type": "STRING", "description": "Nombre del impuesto principal: IVA, ICUI, INC, IPO, Exento"},
+                            "impuesto_tasa": {"type": "NUMBER", "description": "Porcentaje de impuesto (ej. 19, 5, 0, 8, 10, 15, 20)"},
+                            "impuestos": {
+                                "type": "ARRAY",
+                                "description": "Lista detallada de tributos aplicables si están discriminados",
+                                "items": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "nombre": {"type": "STRING", "description": "Nombre del tributo (IVA, INC, ICUI, IPO, Exento)"},
+                                        "tasa": {"type": "NUMBER", "description": "Tarifa porcentual"},
+                                        "valor_fijo": {"type": "NUMBER", "description": "Valor monetario fijo si aplica"}
+                                    },
+                                    "required": ["nombre", "tasa"]
+                                }
+                            },
                             "total": {"type": "NUMBER", "description": "Valor total de compra del renglón"}
                         },
                         "required": ["descripcion", "cantidad", "precio_unitario", "total"]
@@ -453,12 +477,21 @@ class GeminiVisionEngine(BaseVisionEngine):
             }
         }
 
-        async with httpx.AsyncClient(timeout=35.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(self.api_url, json=payload)
             if resp.status_code != 200:
                 raise RuntimeError(f"Fallo en Gemini Vision API (HTTP {resp.status_code}): {resp.text[:250]}")
             data = resp.json()
-            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            candidates = data.get("candidates") or []
+            if not candidates:
+                prompt_feedback = data.get("promptFeedback", {})
+                raise RuntimeError(f"Gemini no retornó candidatos de respuesta. Feedback: {prompt_feedback}")
+            candidate = candidates[0]
+            parts = candidate.get("content", {}).get("parts", [])
+            if not parts:
+                finish_reason = candidate.get("finishReason", "DESCONOCIDO")
+                raise RuntimeError(f"Gemini no generó contenido textual (finishReason: {finish_reason}).")
+            raw_text = parts[0].get("text", "")
             clean_json = raw_text.strip()
             if clean_json.startswith("```"):
                 clean_json = re.sub(r"^```(?:json)?\s*", "", clean_json)
@@ -503,7 +536,44 @@ class GeminiVisionEngine(BaseVisionEngine):
             p_unit = parse_numeric(it.get("precio_unitario", 0.0))
             tot = parse_numeric(it.get("total", 0.0))
             subt = parse_numeric(it.get("subtotal", 0.0)) or (cant * p_unit)
-            
+            desc_val = parse_numeric(it.get("descuento", 0.0))
+            iva_inc = bool(it.get("iva_incluido", data.get("iva_incluido_global", False)))
+
+            # Enriquecer cada ítem con el motor financiero determinista Fruver (pricing_engine.py)
+            costo_base = p_unit
+            costo_neto = p_unit
+            costo_inv = p_unit
+            tot_unids = cant * equiv
+            precio_vta = 0.0
+            precio_vta_fin = 0.0
+            margen_pct = settings.DEFAULT_PROFIT_MARGIN
+            tot_imp_calc = 0.0
+
+            try:
+                calc_fin = calcular_costos_item_factura(
+                    costo_original=p_unit,
+                    cantidad=cant,
+                    presentacion=pres,
+                    unidades_por_presentacion=equiv,
+                    descuento=desc_val,
+                    iva_incluido=iva_inc,
+                    conceptos_impuestos=tax_objs,
+                    porcentaje_margen=settings.DEFAULT_PROFIT_MARGIN,
+                    base_redondeo=settings.ROUNDING_BASE
+                )
+                desc_val = calc_fin.get("descuento", desc_val)
+                costo_base = calc_fin["costo_base_presentacion"]
+                costo_neto = calc_fin["costo_neto_presentacion"]
+                costo_inv = calc_fin["costo_unitario_inventario"]
+                tot_unids = calc_fin["total_unidades_inventario"]
+                precio_vta = calc_fin["precio_venta_calculado"]
+                precio_vta_final = calc_fin["precio_venta_final"]
+                precio_vta_fin = precio_vta_final
+                margen_pct = calc_fin["porcentaje_margen"]
+                tot_imp_calc = calc_fin["total_impuestos_aplicados"]
+            except Exception as e_fin:
+                logger.debug(f"Cálculo financiero omitido para ítem {desc}: {e_fin}")
+
             item_dict = {
                 "id": idx + 1,
                 "codigo": clean_text(it.get("codigo", "")),
@@ -515,10 +585,18 @@ class GeminiVisionEngine(BaseVisionEngine):
                 "unidades_por_presentacion": equiv,
                 "precio_unitario": p_unit,
                 "subtotal": subt,
-                "descuento": parse_numeric(it.get("descuento", 0.0)),
+                "descuento": desc_val,
                 "impuestos": tax_objs,
                 "total": tot or subt,
-                "iva_incluido": bool(it.get("iva_incluido", data.get("iva_incluido_global", False))),
+                "iva_incluido": iva_inc,
+                "costo_base_presentacion": costo_base,
+                "costo_neto_presentacion": costo_neto,
+                "costo_unitario_inventario": costo_inv,
+                "total_unidades_inventario": tot_unids,
+                "precio_venta_calculado": precio_vta,
+                "precio_venta_final": precio_vta_fin,
+                "porcentaje_margen": margen_pct,
+                "total_impuestos_calculados": tot_imp_calc,
                 "confianza": 0.99,
                 "advertencias": []
             }
@@ -553,6 +631,29 @@ class GeminiVisionEngine(BaseVisionEngine):
         except Exception as e_alias:
             logger.warning(f"Error consultando memoria adaptativa en Gemini: {e_alias}")
 
+        # Normalización y saneamiento determinista de totales de cabecera
+        data["proveedor"] = clean_text(data.get("proveedor") or "") or "Proveedor Desconocido"
+        data["nit"] = clean_text(data.get("nit") or "")
+        data["numero_factura"] = clean_text(data.get("numero_factura") or "")
+        raw_date = data.get("fecha")
+        data["fecha"] = normalize_date(raw_date) or clean_text(raw_date or "")
+        data["condicion_pago"] = clean_text(data.get("condicion_pago") or "")
+        data["subtotal"] = parse_numeric(data.get("subtotal", 0.0))
+        data["total_impuestos"] = parse_numeric(data.get("total_impuestos", 0.0))
+        data["descuento"] = parse_numeric(data.get("descuento", 0.0))
+        data["total"] = parse_numeric(data.get("total", 0.0))
+        data["iva_incluido_global"] = bool(data.get("iva_incluido_global", False))
+
+        calc_subtotal = sum(it["subtotal"] for it in items_res)
+        calc_total = sum(it["total"] for it in items_res)
+        if data["subtotal"] <= 0.0 and calc_subtotal > 0.0:
+            data["subtotal"] = calc_subtotal
+        if data["total"] <= 0.0 and calc_total > 0.0:
+            data["total"] = calc_total
+        if data["total_impuestos"] <= 0.0 and data["total"] > data["subtotal"]:
+            data["total_impuestos"] = round(data["total"] - data["subtotal"], 2)
+
+        data["advertencias_generales"] = data.get("advertencias_generales") or []
         data["items"] = items_res
         data["confidence_score"] = 0.99 if items_res else 0.40
         return data
@@ -562,26 +663,387 @@ class PDFInvoiceEngine(BaseVisionEngine):
     """
     Motor especializado para documentos PDF (digitales vectoriales o escaneados).
     Extrae texto digital en milisegundos con pypdf, o renderiza páginas para OCR adaptativo.
+    Desencripta automáticamente en memoria con settings.DIAN_RECEPTOR_NIT si viene protegido.
     """
-    def __init__(self, rapidocr_engine):
+    def __init__(self, rapidocr_engine=None):
         self.rapidocr_engine = rapidocr_engine
+
+    def _is_dian_document(self, text: str) -> bool:
+        if not text:
+            return False
+        text_upper = text.upper()
+        dian_signals = [
+            "DETALLES DE PRODUCTOS" in text_upper,
+            "CÓDIGO ÚNICO DE FACTURA" in text_upper or "CODIGO UNICO DE FACTURA" in text_upper or "CUFE" in text_upper,
+            "FACTURA ELECTRÓNICA DE VENTA" in text_upper or "FACTURA ELECTRONICA DE VENTA" in text_upper,
+            "CATALOGO-VPFE.DIAN.GOV.CO" in text.lower(),
+            "DATOS DEL EMISOR" in text_upper and "DATOS DEL ADQUIRIENTE" in text_upper,
+        ]
+        return ("DETALLES DE PRODUCTOS" in text_upper and any(dian_signals[1:])) or sum(dian_signals) >= 2
+
+    def _parse_dian_official_pdf(self, full_text: str) -> dict:
+        """
+        Extractor nativo y determinista para la representación gráfica oficial de la DIAN (VPFE).
+        Extrae el 100% de la cabecera, CUFE, emisor, receptor, totales e ítems con precisión vectorial.
+        """
+        from app.core import database
+
+        # 1. Metadatos de Cabecera
+        cufe_m = re.search(r"C[oó]digo\s+[ÚU]nico\s+de\s+Factura\s*-\s*CUFE\s*:\s*([0-9a-fA-F]{64,128})", full_text, re.IGNORECASE)
+        if not cufe_m:
+            cufe_m = re.search(r"CUFE\s*:\s*([0-9a-fA-F]{64,128})", full_text, re.IGNORECASE)
+        if not cufe_m:
+            cufe_m = re.search(r"\b([0-9a-fA-F]{64,128})\b", full_text)
+        cufe = cufe_m.group(1).strip() if cufe_m else ""
+
+        num_m = re.search(r"N[uú]mero\s+de\s+Factura\s*:\s*([A-Za-z0-9_-]+)", full_text, re.IGNORECASE)
+        if not num_m:
+            num_m = re.search(r"Factura\s+Electr[oó]nica\s+de\s+Venta\s*(?:No\.?|:)?\s*([A-Za-z0-9_-]+)", full_text, re.IGNORECASE)
+        numero_factura = num_m.group(1).strip() if num_m else ""
+
+        date_m = re.search(r"Fecha\s+de\s+Emisi[oó]n\s*:\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})", full_text, re.IGNORECASE)
+        fecha = ""
+        if date_m:
+            raw_d = date_m.group(1).strip()
+            parts = re.split(r"[-/]", raw_d)
+            if len(parts) == 3:
+                d, m, y = parts
+                if len(y) == 2:
+                    y = "20" + y
+                fecha = f"{y}-{int(m):02d}-{int(d):02d}"
+
+        emisor_m = re.search(r"(?:Datos\s+del\s+Emisor|Facturador\s+Electr[oó]nico).*?Raz[oó]n\s+Social\s*:\s*([^\r\n]+)", full_text, re.DOTALL | re.IGNORECASE)
+        if not emisor_m:
+            emisor_m = re.search(r"Raz[oó]n\s+Social\s*:\s*([^\r\n]+)", full_text, re.IGNORECASE)
+        proveedor = clean_text(emisor_m.group(1)) if emisor_m else "Proveedor Desconocido"
+
+        nit_m = re.search(r"(?:Datos\s+del\s+Emisor|Facturador\s+Electr[oó]nico).*?Nit(?: del Emisor)?\s*:\s*([0-9.-]+)", full_text, re.DOTALL | re.IGNORECASE)
+        if not nit_m:
+            nit_m = re.search(r"NIT\s*:\s*([0-9.-]+)", full_text, re.IGNORECASE)
+        nit = re.sub(r"\D", "", nit_m.group(1)) if nit_m else ""
+
+        # 2. Totales de Página de Totales
+        subt_m = re.findall(r"Subtotal\s*([0-9.,]+)", full_text, re.IGNORECASE)
+        subtotal = parse_numeric(subt_m[-1]) if subt_m else 0.0
+
+        iva_m = re.findall(r"IVA\s*([0-9.,]+)", full_text, re.IGNORECASE)
+        total_impuestos = 0.0
+        if iva_m:
+            nums = [parse_numeric(x) for x in iva_m if parse_numeric(x) > 100]
+            if nums:
+                total_impuestos = nums[-1]
+
+        tot_m = re.findall(r"Total\s+factura\s*\(=\)[^\$0-9]*\$?\s*([0-9.,]+)", full_text, re.IGNORECASE)
+        if not tot_m:
+            tot_m = re.findall(r"Total\s+neto\s+factura\s*\(=\)[^\$0-9]*\$?\s*([0-9.,]+)", full_text, re.IGNORECASE)
+        total = parse_numeric(tot_m[-1]) if tot_m else 0.0
+
+        # 3. Extracción de Ítems en "Detalles de Productos"
+        items = []
+        detalles_idx = full_text.find("Detalles de Productos")
+        if detalles_idx != -1:
+            end_idx = full_text.find("Notas Finales", detalles_idx)
+            if end_idx == -1:
+                end_idx = full_text.find("Datos Totales", detalles_idx)
+            if end_idx == -1:
+                end_idx = len(full_text)
+
+            block = full_text[detalles_idx:end_idx]
+            raw_lines = block.split("\n")
+
+            start_idx = -1
+            for i, l in enumerate(raw_lines):
+                if l.strip() == "1":
+                    start_idx = i
+                    break
+
+            if start_idx != -1:
+                item_lines = raw_lines[start_idx:]
+                chunks = []
+                curr_chunk = []
+                curr_num = 1
+                for l in item_lines:
+                    if l.strip() == str(curr_num + 1) and len(curr_chunk) >= 5:
+                        chunks.append(curr_chunk)
+                        curr_chunk = []
+                        curr_num += 1
+                    curr_chunk.append(l)
+                if curr_chunk:
+                    chunks.append(curr_chunk)
+
+                def is_code_token(s: str, has_existing: bool) -> bool:
+                    s = s.strip()
+                    if not s or " " in s:
+                        return False
+                    if has_existing and s.isdigit() and len(s) <= 6:
+                        return True
+                    if any(c.isdigit() for c in s) and len(s) <= 16:
+                        return True
+                    return False
+
+                KNOWN_UNITS = ("WSD", "UND", "UN", "KGM", "KG", "NIU", "PQT", "CJA", "PAQ", "GRM", "MTR", "LT", "LTR", "GLN", "BOT", "PZA")
+
+                for idx, ch in enumerate(chunks):
+                    um_idx = -1
+                    for j, l in enumerate(ch[1:], 1):
+                        if l.strip().upper() in KNOWN_UNITS:
+                            um_idx = j
+                            break
+                        if re.match(r"^[0-9]+[.,][0-9]{2}$", l.strip()) and j >= 2:
+                            um_idx = j - 1
+                            break
+
+                    header_lines = ch[1:um_idx] if um_idx != -1 else ch[1:2]
+                    um = ch[um_idx].strip() if um_idx != -1 and ch[um_idx].strip().upper() in KNOWN_UNITS else "UND"
+                    rest = [l.strip() for l in ch[um_idx + 1:] if l.strip()]
+
+                    code_parts = []
+                    desc_lines = []
+                    for hl in header_lines:
+                        s = hl.strip()
+                        if not s:
+                            continue
+                        if not desc_lines and is_code_token(s, bool(code_parts)):
+                            code_parts.append(s)
+                        else:
+                            desc_lines.append(hl)
+
+                    desc = ""
+                    for dl in desc_lines:
+                        if not desc:
+                            desc = dl
+                        else:
+                            if desc.endswith(" "):
+                                desc = desc + dl.strip()
+                            else:
+                                if dl.startswith(" "):
+                                    desc = desc + dl.strip()
+                                elif re.match(r"^[0-9]", dl.strip()) and not re.match(r"^[0-9]", desc.split()[-1]):
+                                    desc = desc + " " + dl.strip()
+                                else:
+                                    desc = desc + dl.strip()
+
+                    code = "".join(code_parts)
+                    descripcion = clean_text(desc)
+                    if not descripcion and code_parts:
+                        descripcion = " ".join(code_parts)
+                        code = ""
+
+                    numeric_vals = [parse_numeric(x) for x in rest if x and x != "%"]
+
+                    cant = 1.0
+                    p_unit = 0.0
+                    subt = 0.0
+                    descuento_val = 0.0
+                    t_iva = 19.0
+                    v_iva = 0.0
+                    tot = 0.0
+
+                    if len(numeric_vals) >= 7:
+                        cant = numeric_vals[0]
+                        p_unit = numeric_vals[1]
+                        descuento_val = numeric_vals[2]
+                        v_iva = numeric_vals[4]
+                        t_iva = numeric_vals[5]
+                        tot = numeric_vals[6]
+                        subt = round(cant * p_unit, 2)
+                    elif len(numeric_vals) >= 5:
+                        cant = numeric_vals[0]
+                        p_unit = numeric_vals[1]
+                        descuento_val = numeric_vals[2]
+                        v_iva = numeric_vals[3]
+                        t_iva = numeric_vals[4]
+                        tot = numeric_vals[5] if len(numeric_vals) > 5 else round(cant * p_unit, 2)
+                        subt = round(cant * p_unit, 2)
+                    elif len(numeric_vals) >= 2:
+                        cant = numeric_vals[0]
+                        p_unit = numeric_vals[1]
+                        tot = numeric_vals[-1]
+                        subt = round(cant * p_unit, 2)
+                    elif len(numeric_vals) == 1:
+                        tot = numeric_vals[0]
+                        p_unit = tot
+                        cant = 1.0
+                        subt = tot
+
+                    if subt <= 0:
+                        subt = round(cant * p_unit, 2)
+                    if tot <= 0:
+                        tot = subt
+
+                    tax_objs = []
+                    if t_iva > 0 or v_iva > 0:
+                        tax_objs.append({
+                            "nombre": f"IVA {int(t_iva)}%" if t_iva.is_integer() else f"IVA {t_iva}%",
+                            "tasa": t_iva,
+                            "valor_fijo": 0.0,
+                            "aplicado": True,
+                            "valor_calculado": v_iva
+                        })
+
+                    pres, equiv = detect_presentation_equivalence(descripcion, um)
+
+                    costo_base = p_unit
+                    costo_neto = p_unit
+                    costo_inv = p_unit
+                    tot_unids = cant * equiv
+                    precio_vta = 0.0
+                    precio_vta_fin = 0.0
+                    margen_pct = settings.DEFAULT_PROFIT_MARGIN
+                    tot_imp_calc = 0.0
+
+                    try:
+                        calc_fin = calcular_costos_item_factura(
+                            costo_original=p_unit,
+                            cantidad=cant,
+                            presentacion=pres,
+                            unidades_por_presentacion=equiv,
+                            descuento=descuento_val,
+                            iva_incluido=False,
+                            conceptos_impuestos=tax_objs,
+                            porcentaje_margen=settings.DEFAULT_PROFIT_MARGIN,
+                            base_redondeo=settings.ROUNDING_BASE
+                        )
+                        descuento_val = calc_fin.get("descuento", descuento_val)
+                        costo_base = calc_fin["costo_base_presentacion"]
+                        costo_neto = calc_fin["costo_neto_presentacion"]
+                        costo_inv = calc_fin["costo_unitario_inventario"]
+                        tot_unids = calc_fin["total_unidades_inventario"]
+                        precio_vta = calc_fin["precio_venta_calculado"]
+                        precio_vta_fin = calc_fin["precio_venta_final"]
+                        margen_pct = calc_fin["porcentaje_margen"]
+                        tot_imp_calc = calc_fin["total_impuestos_aplicados"]
+                    except Exception as e_fin:
+                        logger.debug(f"Cálculo financiero omitido para {descripcion}: {e_fin}")
+
+                    item_dict = {
+                        "id": idx + 1,
+                        "codigo": code,
+                        "descripcion": descripcion,
+                        "canonical_name": descripcion,
+                        "cantidad": cant,
+                        "unidad": um,
+                        "presentacion": pres,
+                        "unidades_por_presentacion": equiv,
+                        "precio_unitario": p_unit,
+                        "subtotal": subt,
+                        "descuento": descuento_val,
+                        "impuestos": tax_objs,
+                        "total": tot,
+                        "iva_incluido": False,
+                        "costo_base_presentacion": costo_base,
+                        "costo_neto_presentacion": costo_neto,
+                        "costo_unitario_inventario": costo_inv,
+                        "total_unidades_inventario": tot_unids,
+                        "precio_venta_calculado": precio_vta,
+                        "precio_venta_final": precio_vta_fin,
+                        "porcentaje_margen": margen_pct,
+                        "total_impuestos_calculados": tot_imp_calc,
+                        "confianza": 0.99,
+                        "advertencias": []
+                    }
+
+                    # Enriquecimiento con memoria adaptativa local
+                    try:
+                        alias = database.get_product_alias(descripcion)
+                        if alias:
+                            item_dict["matched_alias"] = True
+                            item_dict["canonical_name"] = alias.get("canonical_name") or descripcion
+                            if alias.get("barcode"):
+                                item_dict["codigo_factura"] = item_dict.get("codigo")
+                                item_dict["codigo"] = alias["barcode"]
+                            if alias.get("default_presentation") and alias["default_presentation"] != "Und":
+                                item_dict["presentacion"] = alias["default_presentation"]
+                                item_dict["unidades_por_presentacion"] = float(alias.get("default_units_per_pres") or 1.0)
+                    except Exception as e_alias:
+                        logger.debug(f"Error consultando alias en memoria para {descripcion}: {e_alias}")
+
+                    items.append(item_dict)
+
+        calc_subtotal = round(sum(it["subtotal"] for it in items), 2)
+        calc_total = round(sum(it["total"] for it in items), 2)
+        if subtotal <= 0.0 and calc_subtotal > 0.0:
+            subtotal = calc_subtotal
+        if total <= 0.0 and calc_total > 0.0:
+            total = calc_total
+        if total_impuestos <= 0.0 and total > subtotal:
+            total_impuestos = round(total - subtotal, 2)
+
+        return {
+            "success": True,
+            "proveedor": proveedor,
+            "supplier_name": proveedor,
+            "nit": nit,
+            "numero_factura": numero_factura,
+            "invoice_number": numero_factura,
+            "fecha": fecha,
+            "invoice_date": fecha,
+            "cufe": cufe,
+            "subtotal": subtotal,
+            "total_impuestos": total_impuestos,
+            "descuento": 0.0,
+            "total": total,
+            "iva_incluido_global": False,
+            "motor_utilizado": "PDF DIAN Oficial Nativo (Vectorial Desencriptado)",
+            "provider_used": "PDF DIAN Oficial Nativo (Vectorial Desencriptado)",
+            "confidence_score": 1.0,
+            "advertencias_generales": [],
+            "items": items
+        }
+
 
     async def extract_invoice(self, file_bytes: bytes, filename: str = "") -> Dict[str, Any]:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+
+        # Desencriptación automática si el PDF oficial DIAN viene protegido con contraseña
+        if reader.is_encrypted:
+            nit = str(getattr(settings, "DIAN_RECEPTOR_NIT", "40327379")).strip()
+            nit_clean = re.sub(r"\D", "", nit)
+            decrypted = False
+            for pwd in [nit, nit_clean, ""]:
+                try:
+                    res = reader.decrypt(pwd)
+                    if res in (1, 2):
+                        decrypted = True
+                        logger.info(f"Desencriptando PDF de factura con NIT configurado en .env ({nit})...")
+                        break
+                except Exception as e_dec:
+                    logger.debug(f"Fallo intento desencriptación con '{pwd}': {e_dec}")
+
+            if not decrypted:
+                try:
+                    _ = len(reader.pages)
+                except Exception:
+                    raise ValueError(
+                        f"El archivo PDF está protegido con contraseña y no se pudo desencriptar con el NIT receptor ({nit})."
+                    )
+
         total_pages = len(reader.pages)
         logger.info(f"Procesando documento PDF ({total_pages} páginas)...")
 
         # 1. Intentar extracción de texto vectorial nativo
         all_digital_text = []
         for i, page in enumerate(reader.pages):
-            txt = page.extract_text() or ""
+            try:
+                txt = page.extract_text() or ""
+            except Exception as e_txt:
+                logger.debug(f"Error extrayendo texto en página {i}: {e_txt}")
+                txt = ""
             if len(txt.strip()) > 30:
                 all_digital_text.append(txt)
 
-        if len(all_digital_text) == total_pages and sum(len(t) for t in all_digital_text) > 150:
-            logger.info("PDF contiene texto digital vectorial nativo. Extrayendo sin OCR...")
+        if len(all_digital_text) > 0 and sum(len(t) for t in all_digital_text) > 80:
             full_pdf_text = "\n".join(all_digital_text)
+            
+            # Si corresponde a la representación gráfica oficial DIAN VPFE
+            if self._is_dian_document(full_pdf_text):
+                logger.info("Detectado formato oficial de Factura Electrónica DIAN. Extrayendo ítems vectoriales nativos...")
+                dian_res = self._parse_dian_official_pdf(full_pdf_text)
+                if dian_res and dian_res.get("items"):
+                    return dian_res
+
+            logger.info("PDF contiene texto digital vectorial nativo. Extrayendo sin OCR...")
             lines = [l.strip() for l in full_pdf_text.splitlines() if l.strip()]
             simulated_boxes = []
             for idx, l in enumerate(lines):
@@ -598,21 +1060,24 @@ class PDFInvoiceEngine(BaseVisionEngine):
                 })
             parser = SpatialInvoiceParser()
             res = parser.parse(simulated_boxes, (1000, max(1200, len(lines) * 22)))
-            res["motor_utilizado"] = "PDF Nativo Digital (Vectorial)"
+            res["motor_utilizado"] = "PDF Nativo Digital (Vectorial Desencriptado)"
             res["confidence_score"] = 0.99
             return res
 
         # 2. Si es escaneado, extraer imágenes de las páginas
         page_images = []
         for page in reader.pages:
-            for img_obj in page.images:
-                page_images.append(img_obj.data)
+            try:
+                for img_obj in page.images:
+                    page_images.append(img_obj.data)
+            except Exception as e_img:
+                logger.debug(f"No se pudieron extraer imágenes de la página: {e_img}")
 
         if not page_images:
             raise ValueError("El archivo PDF no contiene texto digital ni imágenes escaneadas legibles.")
 
         # Procesar primera página con RapidOCR
-        rapid_engine = RapidOCRVisionEngine()
+        rapid_engine = self.rapidocr_engine or RapidOCRVisionEngine()
         return await rapid_engine.extract_invoice(page_images[0], filename)
 
 
@@ -1817,11 +2282,8 @@ class RapidOCRVisionEngine(BaseVisionEngine):
 
         # 1. Soporte Nativo de PDFs
         if filename.lower().endswith(".pdf") or file_bytes.startswith(b"%PDF"):
-            try:
-                pdf_engine = PDFInvoiceEngine(engine)
-                return await pdf_engine.extract_invoice(file_bytes, filename)
-            except Exception as e_pdf:
-                logger.warning(f"Extracción de PDF falló, intentando como imagen rasterizada: {e_pdf}")
+            pdf_engine = PDFInvoiceEngine(engine)
+            return await pdf_engine.extract_invoice(file_bytes, filename)
 
         # 2. Pipeline Adaptativo de Preprocesamiento de Imágenes (Orientación <80ms + 4-Point Warp)
         try:
@@ -1979,11 +2441,26 @@ class UnifiedEnsembleVisionEngine(BaseVisionEngine):
         self.table_engine = RapidTableVisionEngine() if getattr(settings, "OCR_USE_RAPID_TABLE", True) else None
 
     async def extract_invoice(self, file_bytes: bytes, filename: str = "") -> Dict[str, Any]:
+        # RUTA 0: Si es un archivo PDF, intentar extracción vectorial nativa instantánea (con desencriptación automática si tiene clave NIT)
+        is_pdf = filename.lower().endswith(".pdf") or file_bytes[:4] == b"%PDF"
+        if is_pdf:
+            try:
+                pdf_engine = PDFInvoiceEngine()
+                pdf_res = await pdf_engine.extract_invoice(file_bytes, filename)
+                if pdf_res.get("items") and len(pdf_res["items"]) > 0:
+                    logger.info(f"Factura PDF digital procesada exitosamente ({len(pdf_res['items'])} productos).")
+                    return pdf_res
+            except Exception as e_pdf_direct:
+                logger.warning(f"Extracción directa vectorial de PDF pasó a siguiente motor: {e_pdf_direct}")
+
         # RUTA 1: Si hay API Key de Gemini configurada, usar la inteligencia multimodal de maxima precision
         if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip():
             try:
-                logger.info("Ejecutando extraccion inteligente con Gemini 2.5 Flash (Structured Outputs)...")
-                gemini_engine = GeminiVisionEngine(api_key=settings.GEMINI_API_KEY.strip())
+                gemini_model = (getattr(settings, "GEMINI_MODEL", None) or "gemini-3.8-flash").strip()
+                if gemini_model.startswith("models/"):
+                    gemini_model = gemini_model[len("models/"):]
+                logger.info(f"Ejecutando extraccion inteligente con Gemini ({gemini_model}) (Structured Outputs)...")
+                gemini_engine = GeminiVisionEngine(api_key=settings.GEMINI_API_KEY.strip(), model_name=gemini_model)
                 cloud_res = await gemini_engine.extract_invoice(file_bytes, filename)
                 if cloud_res.get("items") and len(cloud_res["items"]) > 0:
                     cloud_res["motor_utilizado"] = f"{gemini_engine.model_name} (SOTA VLM Nube)"
@@ -2029,6 +2506,69 @@ class UnifiedEnsembleVisionEngine(BaseVisionEngine):
         return local_result
 
 
+class DIANQRVisionEngine(BaseVisionEngine):
+    """
+    Motor especializado para lectura de Facturas Electrónicas DIAN mediante Código QR
+    y consulta automatizada en el Catálogo VPFE Oficial de la DIAN.
+    """
+    def __init__(self):
+        from app.services.dian_qr_service import DIANQRService
+        from app.services.dian_portal_service import DIANPortalService
+        self.qr_service = DIANQRService
+        self.portal_service = DIANPortalService
+
+    async def extract_invoice(self, file_bytes: bytes, filename: str = "") -> Dict[str, Any]:
+        logger.info("Iniciando extracción con DIANQRVisionEngine...")
+        # 1. Detectar y decodificar código QR
+        qr_info = self.qr_service.process_file_qr(file_bytes, filename)
+
+        # 2. Si se detecta QR con CUFE o URL DIAN
+        if qr_info.get("has_qr") and qr_info.get("cufe"):
+            cufe = qr_info["cufe"]
+            nit = qr_info.get("nit_receptor") or getattr(settings, "DIAN_RECEPTOR_NIT", "40327379")
+            logger.info(f"QR DIAN detectado con CUFE {cufe[:16]}... Consultando portal oficial...")
+
+            # Intentar consulta y descarga automática en portal DIAN
+            try:
+                portal_res = await self.portal_service.fetch_document(document_key=cufe, nit=nit)
+                if portal_res.get("success") and portal_res.get("pdf_bytes"):
+                    pdf_engine = PDFInvoiceEngine()
+                    parsed_res = await pdf_engine.extract_invoice(portal_res["pdf_bytes"], filename=f"dian_{cufe[:12]}.pdf")
+                    parsed_res["motor_utilizado"] = "Portal Oficial DIAN (Descarga Automatizada VPFE)"
+                    parsed_res["cufe"] = cufe
+                    parsed_res["dian_url"] = portal_res.get("dian_url")
+                    return parsed_res
+            except Exception as e_portal:
+                logger.warning(f"No se pudo descargar automáticamente del portal DIAN: {e_portal}")
+
+            # Fallback híbrido: Rescate con metadatos garantizados del QR + OCR del documento
+            logger.info("Aplicando rescate híbrido: Combinando metadatos QR DIAN con OCR de alta precisión...")
+            unified_engine = UnifiedEnsembleVisionEngine()
+            ocr_res = await unified_engine.extract_invoice(file_bytes, filename)
+
+            if qr_info.get("numero_factura"):
+                ocr_res["numero_factura"] = qr_info["numero_factura"]
+            if qr_info.get("fecha"):
+                ocr_res["fecha"] = qr_info["fecha"]
+            if qr_info.get("nit_emisor"):
+                ocr_res["nit_proveedor"] = qr_info["nit_emisor"]
+            if qr_info.get("total") and qr_info["total"] > 0:
+                ocr_res["total"] = qr_info["total"]
+            if qr_info.get("subtotal") and qr_info["subtotal"] > 0:
+                ocr_res["subtotal"] = qr_info["subtotal"]
+            if qr_info.get("total_impuestos") and qr_info["total_impuestos"] > 0:
+                ocr_res["total_impuestos"] = qr_info["total_impuestos"]
+            ocr_res["cufe"] = cufe
+            ocr_res["dian_url"] = qr_info.get("dian_url")
+            ocr_res["motor_utilizado"] = "Código QR DIAN + Motor Unificado"
+            return ocr_res
+
+        # 3. Si no hay QR o no es de la DIAN, recurrir al motor unificado
+        logger.info("No se encontró código QR DIAN en el archivo. Utilizando motor unificado como fallback...")
+        unified_engine = UnifiedEnsembleVisionEngine()
+        return await unified_engine.extract_invoice(file_bytes, filename)
+
+
 HybridVisionEngine = UnifiedEnsembleVisionEngine
 
 
@@ -2041,9 +2581,20 @@ class VisionEngineFactory:
 
         prov = (provider or settings.VISION_PROVIDER or "auto").lower().strip()
 
+        if prov in ("qr_dian", "dian", "qr", "cufe"):
+            logger.info("Utilizando motor DIAN QR & Consulta Oficial VPFE.")
+            return DIANQRVisionEngine()
+
+        if prov in ("pdf", "digital_pdf"):
+            logger.info("Utilizando motor nativo PDF con desencriptación automática.")
+            return PDFInvoiceEngine()
+
         if prov in ("gemini", "cloud") and settings.GEMINI_API_KEY:
-            logger.info("Utilizando motor Gemini 2.5 Flash Vision AI.")
-            return GeminiVisionEngine(api_key=settings.GEMINI_API_KEY)
+            gemini_model = (getattr(settings, "GEMINI_MODEL", None) or "gemini-3.8-flash").strip()
+            if gemini_model.startswith("models/"):
+                gemini_model = gemini_model[len("models/"):]
+            logger.info(f"Utilizando motor Gemini ({gemini_model}) Vision AI.")
+            return GeminiVisionEngine(api_key=settings.GEMINI_API_KEY, model_name=gemini_model)
 
         if prov in ("table", "rapid_table", "slanet"):
             logger.info("Utilizando motor RapidTable (SLANet) para deteccion matricial de tablas.")

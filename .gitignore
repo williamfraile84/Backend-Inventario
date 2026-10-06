@@ -37,7 +37,6 @@ temp/
 exports/
 
 # Modelos pesados de Inteligencia Artificial y OCR (PP-OCRv4 ONNX, PyTorch, etc.)
-models/
 models_ocr/*
 !models_ocr/.gitkeep
 *.onnx

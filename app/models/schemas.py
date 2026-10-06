@@ -357,6 +357,36 @@ class InvoiceApplyRequest(BaseModel):
     invoice_date: Optional[str] = None
     items: List[InvoiceApplyItem]
 
+# --- DIAN QR & VPFE CATALOG SCHEMAS ---
+class DianConsultRequest(BaseModel):
+    document_key: str = Field(..., description="CUFE o UUID de la factura electrónica DIAN")
+    nit: Optional[str] = Field(None, description="NIT del emisor o receptor (por defecto se toma de configuración)")
+
+class DianQRScanResponse(BaseModel):
+    success: bool
+    cufe: Optional[str] = None
+    dian_url: Optional[str] = None
+    document_key: Optional[str] = None
+    raw_qr_data: Optional[str] = None
+    nit_emisor: Optional[str] = None
+    nit_receptor: Optional[str] = None
+    numero_factura: Optional[str] = None
+    fecha: Optional[str] = None
+    total: Optional[float] = None
+    parsed_fields: Optional[Dict[str, Any]] = None
+    message: Optional[str] = None
+
+class DianConsultResponse(BaseModel):
+    success: bool
+    requires_user_captcha: bool = False
+    dian_url: Optional[str] = None
+    cufe: Optional[str] = None
+    nit_receptor: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    extraction: Optional[InvoiceExtractionResponse] = None
+    message: Optional[str] = None
+
+
 # --- CATALOGOS 3NF: EMPAQUES Y GASTOS ---
 class PackagingTypeResponse(BaseModel):
     id: int

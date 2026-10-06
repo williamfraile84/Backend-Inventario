@@ -16,13 +16,18 @@ from app.services.product_service import ProductService
 from app.services.pos_service import POSService
 from app.services.storage.storage_factory import get_storage_provider
 from app.services.export_service import ExportService
+from app.services.dian_qr_service import DIANQRService
+from app.services.dian_portal_service import DIANPortalService
 from app.models.schemas import (
     InvoiceExtractionResponse,
     InvoiceCostCalculationRequest,
     InvoiceCostCalculationResponse,
     InvoiceApplyRequest,
     InvoiceLearnRequest,
-    InvoiceLearnResponse
+    InvoiceLearnResponse,
+    DianConsultRequest,
+    DianQRScanResponse,
+    DianConsultResponse
 )
 
 logger = logging.getLogger("InvoicesRouter")
@@ -132,6 +137,156 @@ async def process_invoice_image(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error durante el procesamiento de la factura: {str(e)}"
+        )
+
+@router.post("/scan-qr", response_model=DianQRScanResponse)
+async def scan_invoice_qr(
+    file: UploadFile = File(..., description="Imagen o PDF que contiene el código QR de la factura DIAN"),
+    current_user: Dict[str, Any] = Depends(require_permission("can_lookup"))
+):
+    """
+    Escanea y decodifica un código QR de Factura Electrónica DIAN desde una imagen o PDF.
+    Extrae el CUFE/UUID, URL del catálogo VPFE, emisor, receptor, fecha y totales.
+    """
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Archivo vacío.")
+
+    qr_data = DIANQRService.process_file_qr(file_bytes, filename=file.filename or "")
+    if not qr_data.get("has_qr"):
+        return DianQRScanResponse(
+            success=False,
+            message="No se detectó ningún código QR legible en el documento o imagen."
+        )
+
+    cufe = qr_data.get("cufe") or qr_data.get("document_key")
+    dian_url = qr_data.get("dian_url") or (DIANPortalService.get_search_url(cufe) if cufe else None)
+    nit_receptor = qr_data.get("nit_receptor") or getattr(settings, "DIAN_RECEPTOR_NIT", "40327379")
+
+    return DianQRScanResponse(
+        success=True,
+        cufe=cufe,
+        dian_url=dian_url,
+        document_key=qr_data.get("document_key") or cufe,
+        raw_qr_data=qr_data.get("raw_text"),
+        nit_emisor=qr_data.get("nit_emisor"),
+        nit_receptor=nit_receptor,
+        numero_factura=qr_data.get("numero_factura"),
+        fecha=qr_data.get("fecha"),
+        total=qr_data.get("total"),
+        parsed_fields=qr_data.get("fields"),
+        message="Código QR DIAN detectado y decodificado exitosamente."
+    )
+
+@router.post("/consult-dian", response_model=DianConsultResponse)
+async def consult_dian_document(
+    payload: DianConsultRequest,
+    current_user: Dict[str, Any] = Depends(require_permission("can_edit_single"))
+):
+    """
+    Consulta una factura electrónica en el Catálogo VPFE de la DIAN mediante su CUFE.
+    - Diligencia el NIT de receptor configurado en .env (DIAN_RECEPTOR_NIT).
+    - Descarga el PDF oficial, lo desencripta y extrae todos los productos y valores.
+    - Si el portal exige captcha interactivo de Cloudflare Turnstile, retorna el enlace
+      oficial y el estado para asistir al usuario en un solo clic.
+    """
+    cufe = (payload.document_key or "").strip()
+    if not cufe:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Debe suministrar el CUFE o DocumentKey.")
+
+    nit = (payload.nit or getattr(settings, "DIAN_RECEPTOR_NIT", "40327379")).strip()
+    dian_search_url = DIANPortalService.get_search_url(cufe)
+
+    try:
+        portal_res = await DIANPortalService.fetch_document(document_key=cufe, nit=nit)
+
+        pdf_bytes = portal_res.get("pdf_bytes")
+        metadata = portal_res.get("metadata") or {}
+        requires_captcha = portal_res.get("requires_user_captcha", False)
+
+        if portal_res.get("success") and pdf_bytes:
+            # Procesar el PDF con PDFInvoiceEngine
+            engine = VisionEngineFactory.get_engine(provider="pdf")
+            extracted = await engine.extract_invoice(pdf_bytes, filename=f"dian_{cufe[:12]}.pdf")
+
+            # Vincular ítems con catálogo/POS (idéntico a /process-image)
+            pos_service = POSService.get_instance()
+            for it in extracted.get("items", []):
+                code = it.get("codigo")
+                desc = it.get("descripcion", "")
+                matched = None
+                if code:
+                    local_p = database.get_product_by_barcode(code)
+                    if local_p:
+                        matched = {
+                            "item_id": str(local_p["id"]),
+                            "barcode": local_p.get("item_number") or code,
+                            "name": local_p["name"],
+                            "category": local_p.get("category", ""),
+                            "cost_price": local_p.get("cost_price", 0.0),
+                            "sale_price": local_p.get("unit_price", 0.0),
+                            "formatted_sale_price": local_p.get("formatted_sale_price", ""),
+                            "stock": str(local_p.get("stock_quantity", 0))
+                        }
+                if not matched and desc:
+                    search_term = " ".join(desc.split()[:2])
+                    try:
+                        pos_search = await pos_service.search_products(search_term)
+                        if pos_search.items:
+                            matched = pos_search.items[0].model_dump()
+                    except Exception:
+                        pass
+                it["matched_pos_item"] = matched
+
+            extracted["success"] = True
+            extracted["supplier_name"] = extracted.get("proveedor") or metadata.get("emisor_nombre")
+            extracted["nit"] = extracted.get("nit") or metadata.get("emisor_nit")
+            extracted["invoice_number"] = extracted.get("numero_factura") or metadata.get("serie_folio")
+            extracted["invoice_date"] = extracted.get("fecha") or metadata.get("fecha_emision")
+            extracted["provider_used"] = "Portal Oficial DIAN (PDF Desencriptado)"
+            extracted["confidence_score"] = 1.0
+
+            # Guardar PDF en almacenamiento si está configurado
+            try:
+                storage = get_storage_provider()
+                date_folder = datetime.now().strftime("%Y%m")
+                unique_key = f"invoices/{date_folder}/dian_{cufe[:12]}.pdf"
+                saved_path = await storage.save_file(unique_key, pdf_bytes, content_type="application/pdf")
+                extracted["storage_path"] = saved_path
+                extracted["file_url"] = storage.get_public_url(saved_path)
+            except Exception as st_err:
+                logger.warning(f"No se pudo guardar PDF descargado de DIAN en storage: {st_err}")
+
+            return DianConsultResponse(
+                success=True,
+                requires_user_captcha=False,
+                dian_url=dian_search_url,
+                cufe=cufe,
+                nit_receptor=nit,
+                metadata=metadata,
+                extraction=InvoiceExtractionResponse(**extracted),
+                message="Factura DIAN descargada y procesada exitosamente."
+            )
+
+        # Si no se pudo obtener el PDF automáticamente (ej. Turnstile)
+        return DianConsultResponse(
+            success=False,
+            requires_user_captcha=requires_captcha or True,
+            dian_url=dian_search_url,
+            cufe=cufe,
+            nit_receptor=nit,
+            metadata=metadata,
+            message=portal_res.get("error") or "Se requiere validación de captcha en el portal DIAN. Puede ingresar con 1 clic y descargar el PDF con contraseña NIT."
+        )
+    except Exception as e:
+        logger.error(f"Error consultando documento en DIAN: {e}", exc_info=True)
+        return DianConsultResponse(
+            success=False,
+            requires_user_captcha=True,
+            dian_url=dian_search_url,
+            cufe=cufe,
+            nit_receptor=nit,
+            message=f"No fue posible consultar directamente: {str(e)}. Use el enlace directo al portal."
         )
 
 @router.post("/calculate-costs", response_model=InvoiceCostCalculationResponse)
