@@ -47,5 +47,9 @@ et-xmlfile>=1.1.0
 beautifulsoup4>=4.12.0
 lxml>=5.1.0
 
+# Automatización y Navegación Web (Integración Portal DIAN)
+playwright>=1.40.0
+
 # Pruebas Automatizadas
 pytest>=8.0.0
+

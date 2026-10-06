@@ -2,7 +2,12 @@ import asyncio
 import io
 import re
 from typing import Dict, Any, Optional
-from playwright.async_api import async_playwright
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    async_playwright = None
+    PLAYWRIGHT_AVAILABLE = False
 
 from app.core.config import settings
 from app.core.logging_config import get_logger
@@ -54,6 +59,15 @@ class DIANPortalService:
             "metadata": {},
             "message": ""
         }
+
+        if not PLAYWRIGHT_AVAILABLE or async_playwright is None:
+            logger.warning("Playwright no está instalado o disponible en este entorno.")
+            result["message"] = (
+                "El paquete de automatización Playwright no está disponible en este servidor. "
+                "Por favor ingrese al portal oficial de la DIAN mediante el enlace proporcionado o cargue el documento manualmente."
+            )
+            result["requires_user_captcha"] = True
+            return result
 
         try:
             async with async_playwright() as p:
