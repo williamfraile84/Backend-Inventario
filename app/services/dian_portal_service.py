@@ -1,3 +1,4 @@
+import sys
 import asyncio
 import io
 import os
@@ -115,13 +116,22 @@ class DIANPortalService:
                     ]
                 }
 
-                # Priorizar Google Chrome del sistema para pasar Turnstile limpiamente
-                channels_to_try = [preferred_channel] if preferred_channel else []
-                for alt in ["chrome", "msedge"]:
-                    if alt not in channels_to_try:
-                        channels_to_try.append(alt)
-                channels_to_try.append(None)
+                # Determinar canales de navegador a intentar según el sistema operativo
+                channels_to_try = []
+                if preferred_channel:
+                    channels_to_try.append(preferred_channel)
 
+                # En Windows/Mac priorizar Google Chrome y Edge para entornos de escritorio
+                if not sys.platform.startswith("linux"):
+                    for alt in ["chrome", "msedge"]:
+                        if alt not in channels_to_try:
+                            channels_to_try.append(alt)
+
+                # Chromium estándar (Playwright) siempre como opción principal en Linux/Docker
+                if None not in channels_to_try:
+                    channels_to_try.append(None)
+
+                last_launch_err = None
                 for ch in channels_to_try:
                     try:
                         kw = dict(launch_kwargs)
@@ -131,10 +141,11 @@ class DIANPortalService:
                         logger.info(f"Navegador Playwright lanzado con canal: {ch or 'chromium estándar'}")
                         break
                     except Exception as e_ch:
+                        last_launch_err = e_ch
                         logger.debug(f"Canal '{ch}' no disponible: {e_ch}")
 
                 if not browser:
-                    browser = p.chromium.launch(**launch_kwargs)
+                    raise RuntimeError(f"No fue posible inicializar el navegador Playwright: {last_launch_err}")
 
                 context = browser.new_context(
                     accept_downloads=True,

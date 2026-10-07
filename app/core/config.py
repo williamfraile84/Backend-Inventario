@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     DIAN_RECEPTOR_NIT: str = "40327379"
     DIAN_PORTAL_TIMEOUT_SECONDS: int = 25
     DIAN_HEADLESS_BROWSER: bool = False
-    DIAN_BROWSER_CHANNEL: str = "chrome"
+    DIAN_BROWSER_CHANNEL: Optional[str] = None
 
     @property
     def effective_database_url(self) -> str:
