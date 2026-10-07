@@ -5,19 +5,14 @@ FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    DIAN_HEADLESS_BROWSER=false \
-    DISPLAY=:99 \
-    DBUS_SESSION_BUS_ADDRESS=/dev/null \
+    DIAN_HEADLESS_BROWSER=true \
     PYTHONPATH=/app
 
 WORKDIR /app
 
-# Instalar utilidades mínimas del sistema y Xvfb (pantalla virtual en memoria RAM)
+# Instalar utilidades mínimas del sistema requeridas por Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    xvfb \
-    xauth \
-    x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar dependencias del backend e instalarlas
@@ -25,7 +20,7 @@ COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Instalar Google Chrome oficial, Chromium y todas las librerías del sistema operativo requeridas
+# Instalar Google Chrome oficial, Chromium y dependencias nativas del sistema
 RUN playwright install --with-deps chrome chromium
 
 # Copiar el código del backend a /app
@@ -34,6 +29,6 @@ COPY . /app/
 # Exponer el puerto por defecto
 EXPOSE 8000
 
-# Asegurar socket X11 limpio, iniciar pantalla virtual Xvfb (modo liviano 16-bit) y arrancar uvicorn
-CMD ["sh", "-c", "mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix && rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 && Xvfb :99 -screen 0 1366x768x16 -ac -noreset & sleep 1 && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Arrancar uvicorn de forma directa, liviana y eficiente
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 

@@ -105,35 +105,18 @@ class DIANPortalService:
         browser = None
         try:
             with sync_playwright() as p:
-                configured_headless = getattr(settings, "DIAN_HEADLESS_BROWSER", False)
+                # En servidores Linux en la nube (Render con límite de 512MB RAM),
+                # el modo headless=True es indispensable para garantizar bajo consumo (<70MB)
+                # y prevenir que el kernel del sistema mate el contenedor por Out Of Memory (OOM).
+                # En entornos locales (Windows / Mac), se respeta la preferencia DIAN_HEADLESS_BROWSER.
+                if sys.platform.startswith("linux"):
+                    headless_mode = True
+                else:
+                    headless_mode = getattr(settings, "DIAN_HEADLESS_BROWSER", False)
+
                 preferred_channel = getattr(settings, "DIAN_BROWSER_CHANNEL", "chrome")
 
-                # Si se solicita modo headed (gráfica visible) en Linux (Render/Docker)
-                if sys.platform.startswith("linux") and not configured_headless:
-                    display = os.environ.get("DISPLAY", ":99")
-                    os.environ["DISPLAY"] = display
-                    socket_path = f"/tmp/.X11-unix/X{display.replace(':', '')}"
-                    if not os.path.exists(socket_path):
-                        logger.info(f"Iniciando servidor gráfico virtual Xvfb en {display}...")
-                        try:
-                            os.makedirs("/tmp/.X11-unix", exist_ok=True)
-                            subprocess.Popen(
-                                ["Xvfb", display, "-screen", "0", "1366x768x16", "-ac", "-noreset"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
-                            for _ in range(15):
-                                time.sleep(0.2)
-                                if os.path.exists(socket_path):
-                                    logger.info(f"Servidor Xvfb listo en {socket_path}")
-                                    break
-                        except Exception as e_xvfb:
-                            logger.warning(f"Aviso al iniciar Xvfb: {e_xvfb}")
-                    headless_mode = False
-                else:
-                    headless_mode = configured_headless
-
-                # Argumentos optimizados para bajo consumo de memoria RAM (<120MB) en servidores
+                # Argumentos optimizados para bajo consumo de memoria RAM (<70MB) en servidores
                 launch_args = [
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
@@ -282,8 +265,8 @@ class DIANPortalService:
                     except Exception as e_click:
                         logger.debug(f"Aviso en clic asistido con coordenadas: {e_click}")
 
-                    # Esperar hasta 14 segundos tras el clic para permitir que Cloudflare procese
-                    for s in range(1, 15):
+                    # Esperar hasta 6 segundos tras el clic para permitir que Cloudflare procese
+                    for s in range(1, 7):
                         time.sleep(1)
                         cf_token = page.evaluate(
                             "() => document.querySelector('[name=cf-turnstile-response]')?.value || document.querySelector('[name=g-recaptcha-response]')?.value || ''"
