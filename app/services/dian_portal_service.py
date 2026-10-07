@@ -5,6 +5,7 @@ import os
 import re
 import time
 import subprocess
+import gc
 from typing import Dict, Any, Optional
 
 try:
@@ -117,7 +118,7 @@ class DIANPortalService:
                         try:
                             os.makedirs("/tmp/.X11-unix", exist_ok=True)
                             subprocess.Popen(
-                                ["Xvfb", display, "-screen", "0", "1366x768x24", "-ac", "-noreset", "+extension", "GLX", "+render"],
+                                ["Xvfb", display, "-screen", "0", "1366x768x16", "-ac", "-noreset"],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL
                             )
@@ -132,16 +133,29 @@ class DIANPortalService:
                 else:
                     headless_mode = configured_headless
 
+                # Argumentos optimizados para bajo consumo de memoria RAM (<120MB) en servidores
+                launch_args = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--no-zygote",
+                    "--disable-infobars",
+                    "--disable-extensions",
+                    "--disable-component-update",
+                    "--mute-audio",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--window-size=1366,768",
+                    "--start-maximized",
+                    "--js-flags=--max-old-space-size=128",
+                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process,Translate,OptimizationHints,MediaRouter"
+                ]
+
                 launch_kwargs = {
                     "headless": headless_mode,
-                    "args": [
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-infobars",
-                        "--window-size=1366,768",
-                        "--start-maximized"
-                    ],
+                    "args": launch_args,
                     "ignore_default_args": ["--enable-automation"]
                 }
 
@@ -170,8 +184,8 @@ class DIANPortalService:
                             browser = p.chromium.launch(**kw)
                         except Exception as e_launch:
                             err_str = str(e_launch)
-                            if ("Missing X server" in err_str or "XServer" in err_str or "DISPLAY" in err_str or "closed" in err_str) and not kw.get("headless"):
-                                logger.warning(f"Modo con interfaz falló en el servidor ({err_str}). Reintentando automáticamente con headless=True...")
+                            if not kw.get("headless") and any(k in err_str for k in ["Missing X server", "XServer", "DISPLAY", "closed", "bus", "exitCode"]):
+                                logger.warning(f"Modo con interfaz falló ({err_str}). Reintentando automáticamente con headless=True...")
                                 kw["headless"] = True
                                 browser = p.chromium.launch(**kw)
                             else:
@@ -338,12 +352,14 @@ class DIANPortalService:
             logger.error(f"Error en automatización DIAN: {e_global}", exc_info=True)
             result["message"] = f"Error comunicando con portal DIAN: {str(e_global)}"
             result["requires_user_captcha"] = True
+            return result
+        finally:
             if browser:
                 try:
                     browser.close()
                 except Exception:
                     pass
-            return result
+            gc.collect()
 
     @classmethod
     def _scrape_public_document_page_sync(cls, page) -> Dict[str, Any]:
