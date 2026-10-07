@@ -24,8 +24,8 @@ COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Instalar Chromium y todas las librerías del sistema operativo requeridas (Playwright con root)
-RUN playwright install --with-deps chromium
+# Instalar Google Chrome oficial, Chromium y todas las librerías del sistema operativo requeridas
+RUN playwright install --with-deps chrome chromium
 
 # Copiar el código del backend a /app
 COPY . /app/

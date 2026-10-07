@@ -149,9 +149,17 @@ class DIANPortalService:
 
                 context = browser.new_context(
                     accept_downloads=True,
-                    viewport={"width": 1280, "height": 800}
+                    viewport={"width": 1366, "height": 768},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    locale="es-CO",
+                    timezone_id="America/Bogota"
                 )
-                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es', 'en-US', 'en']});
+                    window.chrome = { runtime: {} };
+                """)
 
                 page = context.new_page()
 
@@ -178,12 +186,12 @@ class DIANPortalService:
                 page.click("#SearchDocumentNit")
                 page.fill("#SearchDocumentNit", effective_nit)
 
-                # 3. Esperar validación automática de Turnstile (de 3 a 5 segundos)
+                # 3. Esperar validación automática o interactiva de Turnstile
                 token_found = False
                 for s in range(1, 8):
                     time.sleep(1)
                     cf_token = page.evaluate(
-                        "() => document.querySelector('[name=cf-turnstile-response]')?.value || ''"
+                        "() => document.querySelector('[name=cf-turnstile-response]')?.value || document.querySelector('[name=g-recaptcha-response]')?.value || ''"
                     )
                     if cf_token and len(cf_token) > 10:
                         logger.info(f"Cloudflare Turnstile validado automáticamente en {s}s.")
@@ -193,24 +201,43 @@ class DIANPortalService:
                 # Asistir clic en widget Turnstile si aún no se completó
                 if not token_found:
                     logger.info("Asistiendo clic interactivo en widget Turnstile...")
-                    for f in page.frames:
-                        if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
-                            try:
+
+                    # Método A: Intentar interacción directa mediante frame_locator
+                    try:
+                        t_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
+                        t_box = t_frame.locator("input[type=checkbox], .ctp-checkbox-label, #challenge-stage, body").first
+                        if t_box.is_visible(timeout=2500):
+                            t_box.click(force=True, timeout=2500)
+                            logger.info("Clic interactivo ejecutado vía frame_locator en checkbox Turnstile.")
+                    except Exception as e_fl:
+                        logger.debug(f"Aviso en frame_locator: {e_fl}")
+
+                    # Método B: Clic con trayectoria de ratón sobre coordenadas físicas del widget
+                    try:
+                        for f in page.frames:
+                            if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
                                 fe = f.frame_element()
+                                fe.scroll_into_view_if_needed(timeout=2000)
                                 b = fe.bounding_box()
                                 if b:
-                                    page.mouse.click(b['x'] + 30, b['y'] + 32)
-                            except Exception:
-                                pass
-                            break
+                                    target_x = b['x'] + 35
+                                    target_y = b['y'] + (b['height'] / 2 if b['height'] > 20 else 32)
+                                    page.mouse.move(target_x, target_y, steps=15)
+                                    time.sleep(0.3)
+                                    page.mouse.click(target_x, target_y)
+                                    logger.info(f"Clic con mouse ejecutado en widget ({target_x:.0f}, {target_y:.0f}).")
+                                break
+                    except Exception as e_click:
+                        logger.debug(f"Aviso en clic asistido con coordenadas: {e_click}")
 
-                    for s in range(1, 5):
+                    # Esperar hasta 14 segundos tras el clic para permitir que Cloudflare procese
+                    for s in range(1, 15):
                         time.sleep(1)
                         cf_token = page.evaluate(
-                            "() => document.querySelector('[name=cf-turnstile-response]')?.value || ''"
+                            "() => document.querySelector('[name=cf-turnstile-response]')?.value || document.querySelector('[name=g-recaptcha-response]')?.value || ''"
                         )
                         if cf_token and len(cf_token) > 10:
-                            logger.info(f"Cloudflare Turnstile validado tras clic en segundo {s}.")
+                            logger.info(f"Cloudflare Turnstile validado tras clic interactivo en segundo {s}.")
                             token_found = True
                             break
 
