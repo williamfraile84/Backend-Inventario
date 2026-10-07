@@ -10,7 +10,8 @@ from app.models.schemas import (
     SinglePriceUpdateRequest,
     BulkPriceUpdateRequest,
     PriceUpdateResponse,
-    PosStatusResponse
+    PosStatusResponse,
+    PosItemDetailResponse
 )
 
 router = APIRouter(prefix="/products", tags=["Productos y Precios"])
@@ -55,12 +56,12 @@ async def lookup_product(
 
 @router.get("/search", response_model=ProductSearchResponse)
 async def search_products(
-    query: str = Query(..., min_length=1, description="Término o nombre de producto a buscar"),
+    query: str = Query("", description="Término o nombre de producto a buscar (vacío para catálogo inicial)"),
     current_user: Dict[str, Any] = Depends(require_permission("can_lookup")),
     pos_service: POSService = Depends(get_pos_service)
 ):
     """
-    Busca productos en el catálogo por coincidencia de nombre para selección masiva.
+    Busca productos en el catálogo de CSOPOS.
     """
     try:
         results = await pos_service.search_products(query)
@@ -69,6 +70,31 @@ async def search_products(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error durante la búsqueda de productos: {str(e)}"
+        )
+
+@router.get("/csopos/{item_id}", response_model=PosItemDetailResponse)
+async def get_csopos_item_detail(
+    item_id: str,
+    current_user: Dict[str, Any] = Depends(require_permission("can_lookup")),
+    pos_service: POSService = Depends(get_pos_service)
+):
+    """
+    Obtiene los detalles completos de un producto directamente desde CSOPOS para su edición.
+    """
+    try:
+        data = await pos_service.get_pos_item_details(item_id)
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No se encontró el producto con ID '{item_id}' en CSOPOS."
+            )
+        return PosItemDetailResponse(**data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener el producto de CSOPOS: {str(e)}"
         )
 
 @router.post("/update-price", response_model=PriceUpdateResponse)

@@ -276,7 +276,7 @@ async def consult_dian_document(
             cufe=cufe,
             nit_receptor=nit,
             metadata=metadata,
-            message=portal_res.get("error") or "Se requiere validación de captcha en el portal DIAN. Puede ingresar con 1 clic y descargar el PDF con contraseña NIT."
+            message=portal_res.get("message") or portal_res.get("error") or "Se requiere validación de captcha en el portal DIAN. Puede ingresar con 1 clic y descargar el PDF con contraseña NIT."
         )
     except Exception as e:
         logger.error(f"Error consultando documento en DIAN: {e}", exc_info=True)

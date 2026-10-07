@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 import httpx
+import html
+from bs4 import BeautifulSoup
 
 from app.core.config import settings
 from app.models.schemas import ProductLookupResponse, ProductItem, ProductSearchResponse, PriceUpdateResponse
@@ -25,6 +27,16 @@ if _CATALOG_PATH.exists():
         logger.info(f"✅ Catálogo de categorías cargado exitosamente: {len(_LOCAL_CATALOG)} departamentos maestros.")
     except Exception as _e:
         logger.warning(f"⚠️ No se pudo pre-cargar categories_catalog.json: {_e}")
+
+def clean_pos_text(text: Optional[str]) -> str:
+    """Decodifica entidades HTML (&Eacute;, &eacute;, &aacute;, etc.) y caracteres UTF-8."""
+    if not text:
+        return ""
+    res = html.unescape(str(text))
+    if "&" in res and ";" in res:
+        res = html.unescape(res)
+    return res.strip()
+
 
 def parse_cop_currency(text: str) -> float:
     """Parsea representaciones monetarias colombianas como '$1.700', '$ 2,500.50' a float."""
@@ -413,11 +425,11 @@ class POSService:
                 if cart:
                     first_item = list(cart.values())[0]
                     item_id = str(first_item.get("item_id", ""))
-                    name = first_item.get("name", "")
-                    item_number = first_item.get("item_number", "") or barcode
+                    name = clean_pos_text(first_item.get("name", ""))
+                    item_number = clean_pos_text(first_item.get("item_number", "") or barcode)
                     price_val = float(first_item.get("price", 0.0))
                     stock = str(first_item.get("quantity", "0"))
-                    category = first_item.get("category", "General") or "General"
+                    category = clean_pos_text(first_item.get("category", "General") or "General")
 
                     # Limpieza no bloqueante en background
                     asyncio.create_task(self._cancel_sale_async())
@@ -468,7 +480,7 @@ class POSService:
                         continue
                     cols = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL | re.IGNORECASE)
                     if len(cols) >= 6:
-                        clean_cols = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
+                        clean_cols = [clean_pos_text(re.sub(r'<[^>]+>', '', c)) for c in cols]
                         id_display = clean_cols[1]
                         name = clean_cols[2]
                         category = clean_cols[3] if len(clean_cols) > 3 else "General"
@@ -498,11 +510,9 @@ class POSService:
     # -------------------------------------------------------------------------
     # BÚSQUEDA EN CATÁLOGO PARA EDICIÓN MASIVA (~200ms)
     # -------------------------------------------------------------------------
-    async def search_products(self, query: str) -> ProductSearchResponse:
-        """Busca productos en catálogo con respuesta acelerada."""
-        query = query.strip()
-        if not query:
-            return ProductSearchResponse(query="", total=0, items=[])
+    async def search_products(self, query: str = "") -> ProductSearchResponse:
+        """Busca productos en catálogo con respuesta acelerada. Si query está vacío, retorna los primeros ítems."""
+        query_clean = (query or "").strip()
 
         for attempt in range(2):
             try:
@@ -511,7 +521,7 @@ class POSService:
 
                 r = await self.http_client.post(
                     f"{self.base_url}index.php/items/search",
-                    data={"search": query, "category_id": 0, "limit": 60, "offset": 0},
+                    data={"search": query_clean, "category_id": 0, "limit": 60, "offset": 0},
                     timeout=5.0
                 )
                 if r.status_code == 200:
@@ -525,7 +535,7 @@ class POSService:
                             continue
                         cols = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL | re.IGNORECASE)
                         if len(cols) >= 6:
-                            clean_cols = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
+                            clean_cols = [clean_pos_text(re.sub(r'<[^>]+>', '', c)) for c in cols]
                             id_disp = clean_cols[1]
                             name = clean_cols[2]
                             category = clean_cols[3] if len(clean_cols) > 3 else ""
@@ -548,7 +558,7 @@ class POSService:
                                 stock=stock_raw
                             ))
 
-                    return ProductSearchResponse(query=query, total=len(items), items=items)
+                    return ProductSearchResponse(query=query_clean, total=len(items), items=items)
 
             except Exception as e:
                 if "Ambos dominios" in str(e):
@@ -558,6 +568,105 @@ class POSService:
                     await self._login_direct()
                 else:
                     raise
+
+    async def get_pos_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
+        """Obtiene el detalle completo de un producto en CSOPOS mediante items/view/{item_id}."""
+        if not item_id or str(item_id).strip() in ["-1", "", "None"]:
+            return None
+
+        target_id = str(item_id).strip()
+        for attempt in range(2):
+            try:
+                if not self.is_initialized or not self.http_client:
+                    await self.initialize()
+
+                r = await self.http_client.get(f"{self.base_url}index.php/items/view/{target_id}", timeout=6.0)
+                if r.status_code == 200:
+                    await self._ensure_logged_in(r)
+                    soup = BeautifulSoup(r.text, "html.parser")
+
+                    def get_val(selector):
+                        el = soup.select_one(selector)
+                        return el.get("value", "").strip() if el else ""
+
+                    name = clean_pos_text(get_val('input[name="name"]'))
+                    item_number = clean_pos_text(get_val('input[name="item_number"]'))
+                    cost_price_raw = get_val('input[name="cost_price"]')
+                    unit_price_raw = get_val('input[name="unit_price"]')
+                    items_discount = get_val('input[name="items_discount"]')
+                    description_el = soup.select_one('textarea[name="description"]')
+                    description = clean_pos_text(description_el.text if description_el else "")
+
+                    # Categoría
+                    category_code = ""
+                    category_name = ""
+                    cat_select = soup.select_one('select[name="category"]')
+                    if cat_select:
+                        sel_opt = cat_select.select_one('option[selected]')
+                        if sel_opt:
+                            category_code = sel_opt.get("value", "").strip()
+                            category_name = clean_pos_text(sel_opt.text)
+                    if not category_code:
+                        category_code = get_val('input[name="category"]')
+
+                    # Unidad
+                    unit_code = "UN"
+                    unit_select = soup.select_one('select[name="unit"]')
+                    if unit_select:
+                        sel_u = unit_select.select_one('option[selected]')
+                        if sel_u:
+                            unit_code = sel_u.get("value", "").strip()
+                    if not unit_code:
+                        unit_code = get_val('input[name="unit"]') or "UN"
+
+                    # Stock
+                    stock_raw = get_val('input[name="locations[1][quantity]"]') or "0"
+
+                    # Códigos adicionales
+                    additional_numbers = []
+                    add_inputs = soup.select('input[name="item_numbers[]"]')
+                    for inp in add_inputs:
+                        v = clean_pos_text(inp.get("value", ""))
+                        if v and v not in additional_numbers:
+                            additional_numbers.append(v)
+
+                    cost_val = float(cost_price_raw) if cost_price_raw else 0.0
+                    unit_val = float(unit_price_raw) if unit_price_raw else 0.0
+                    try:
+                        stock_val = float(stock_raw)
+                    except ValueError:
+                        stock_val = 0.0
+
+                    profit_pct = 30.0
+                    try:
+                        profit_pct = float(items_discount)
+                    except (ValueError, TypeError):
+                        pass
+
+                    return {
+                        "item_id": target_id,
+                        "name": name,
+                        "item_number": item_number or None,
+                        "category": category_name or "General",
+                        "category_code": category_code or None,
+                        "cost_price": cost_val,
+                        "unit_price": unit_val,
+                        "formatted_sale_price": format_cop_currency(unit_val),
+                        "unit_code": unit_code.upper(),
+                        "stock_quantity": stock_val,
+                        "description": description,
+                        "profit_percentage": profit_pct,
+                        "additional_numbers": additional_numbers
+                    }
+                return None
+            except Exception as e:
+                if attempt == 0:
+                    await self.ensure_active_domain(force_switch=True)
+                    await self._login_direct()
+                else:
+                    logger.warning(f"Error obteniendo detalles del item {target_id} en POS: {e}")
+                    return None
+        return None
 
     # -------------------------------------------------------------------------
     # ACTUALIZACIÓN DE PRECIOS ULTRA-RÁPIDA (~160ms)
@@ -719,9 +828,9 @@ class POSService:
                         if isinstance(item, dict) and "code" in item and "name" in item:
                             results.append({
                                 "code": str(item["code"]).strip(),
-                                "name": str(item["name"]).strip(),
+                                "name": clean_pos_text(str(item["name"])),
                                 "department_code": dep_code,
-                                "department_name": POS_DEPARTMENTS.get(dep_code, "")
+                                "department_name": clean_pos_text(POS_DEPARTMENTS.get(dep_code, ""))
                             })
                     self._categories_by_dep_cache[dep_code] = results
                     return results
@@ -751,9 +860,9 @@ class POSService:
                     if term_clean in c_name or term_clean == c_code or (len(term_clean) >= 3 and term_clean in d_name):
                         local_results.append({
                             "code": cat.get("code"),
-                            "name": cat.get("name"),
+                            "name": clean_pos_text(cat.get("name")),
                             "department_code": cat.get("department_code") or dep_k,
-                            "department_name": cat.get("department_name") or dep_data.get("department_name", "")
+                            "department_name": clean_pos_text(cat.get("department_name") or dep_data.get("department_name", ""))
                         })
                         if len(local_results) >= 60:
                             break
@@ -778,9 +887,9 @@ class POSService:
                     for row in raw_data:
                         data_obj = row.get("data") or {}
                         cat_code = data_obj.get("categoria_code") or ""
-                        cat_name = data_obj.get("categoria") or row.get("value") or ""
+                        cat_name = clean_pos_text(data_obj.get("categoria") or row.get("value") or "")
                         dep_code = data_obj.get("departament_code") or ""
-                        dep_name = data_obj.get("departament") or POS_DEPARTMENTS.get(dep_code, "")
+                        dep_name = clean_pos_text(data_obj.get("departament") or POS_DEPARTMENTS.get(dep_code, ""))
                         if cat_code or cat_name:
                             out.append({
                                 "code": cat_code,
@@ -897,7 +1006,10 @@ class POSService:
                     "commission_value": "0",
                     "commission_type": "percent",
                     "quantity_unit_sale": "1",
-                    "locations[1][quantity]": str(item_data.get("stock_quantity", 0.0)),
+                    "locations[1][quantity]": str(int(float(item_data.get("stock_quantity", 0.0)))) if float(item_data.get("stock_quantity", 0.0)).is_integer() else f"{float(item_data.get('stock_quantity', 0.0)):.2f}",
+                    "locations[1][subcategory_data_quantity][]": str(int(float(item_data.get("stock_quantity", 0.0)))) if float(item_data.get("stock_quantity", 0.0)).is_integer() else f"{float(item_data.get('stock_quantity', 0.0)):.2f}",
+                    "locations[1][subcategory_data_custom1][]": "",
+                    "locations[1][subcategory_data_custom2][]": "",
                     "unit": (item_data.get("unit_code") or "UN").strip().upper(),
                     "locations[1][quantity_warehouse]": "",
                     "locations[1][quantity_transfer]": "",

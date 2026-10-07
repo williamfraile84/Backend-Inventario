@@ -735,6 +735,18 @@ def get_product_by_barcode(barcode: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_product_by_pos_id(pos_item_id: str) -> Optional[Dict[str, Any]]:
+    if not pos_item_id:
+        return None
+    clean = str(pos_item_id).strip()
+    with SessionLocal() as db:
+        p = db.query(Producto).options(joinedload(Producto.additional_numbers_rel)).filter(
+            Producto.pos_item_id == clean,
+            Producto.is_active == True
+        ).first()
+        return _product_to_dict(p) if p else None
+
+
 def create_product(
     name: str,
     category: str,

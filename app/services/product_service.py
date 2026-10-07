@@ -1,3 +1,4 @@
+import html
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from app.core import database
@@ -29,16 +30,29 @@ class ProductService:
         4. Inserción local normalizada (productos + códigos adicionales).
         5. Sincronización transparente con el sistema POS externo (csopos.co).
         """
-        name = str(payload_dict.get("name", "")).strip()
-        category = str(payload_dict.get("category", "")).strip()
+        name = html.unescape(str(payload_dict.get("name", "")).strip())
+        category = html.unescape(str(payload_dict.get("category", "")).strip())
         cost_price = float(payload_dict.get("cost_price", 0.0) or 0.0)
         unit_price = float(payload_dict.get("unit_price", 0.0) or 0.0)
         item_number = str(payload_dict.get("item_number", "")).strip() if payload_dict.get("item_number") else None
         unit_code = str(payload_dict.get("unit_code", "UN")).strip().upper()
         stock_quantity = float(payload_dict.get("stock_quantity", 0.0) or 0.0)
-        description = payload_dict.get("description")
+        description = html.unescape(str(payload_dict.get("description", "")).strip()) if payload_dict.get("description") else None
         profit_percentage = float(payload_dict.get("profit_percentage", 30.0) or 30.0)
         additional_numbers = payload_dict.get("additional_numbers") or []
+
+        incoming_pos_id = str(payload_dict.get("pos_item_id", "")).strip() if payload_dict.get("pos_item_id") else None
+
+        # Si viene con pos_item_id o código de barras, verificar si ya existe en la base de datos local
+        existing_local = None
+        if incoming_pos_id:
+            existing_local = database.get_product_by_pos_id(incoming_pos_id)
+        if not existing_local and item_number:
+            existing_local = database.get_product_by_barcode(item_number)
+
+        if existing_local:
+            logger.info(f"El producto ya existe localmente (ID {existing_local['id']}). Derivando a actualización.")
+            return await self.update_product(existing_local["id"], payload_dict)
 
         # 1. Validaciones en Backend
         if not name:
@@ -80,7 +94,7 @@ class ProductService:
         category_code = payload_dict.get("category_code")
         department_code = payload_dict.get("department_code")
         pos_sync_res = {}
-        pos_item_id = None
+        pos_item_id = incoming_pos_id
         try:
             pos_sync_res = await self.pos_service.create_or_update_pos_item({
                 "name": name,
@@ -94,7 +108,7 @@ class ProductService:
                 "stock_quantity": stock_quantity,
                 "profit_percentage": profit_percentage,
                 "additional_numbers": clean_additionals
-            })
+            }, item_id=pos_item_id)
             if not pos_sync_res.get("success") or str(pos_sync_res.get("item_id", "")) in ["", "-1"]:
                 err_msg = pos_sync_res.get("message") or "El servidor POS externo (csopos.co) rechazó la creación del producto."
                 raise ValueError(f"Fallo en servidor POS: {err_msg}")
@@ -129,14 +143,14 @@ class ProductService:
         if not existing:
             raise KeyError(f"Producto con ID {product_id} no encontrado.")
 
-        name = str(payload_dict.get("name", existing["name"])).strip()
-        category = str(payload_dict.get("category", existing["category"])).strip()
+        name = html.unescape(str(payload_dict.get("name", existing["name"])).strip())
+        category = html.unescape(str(payload_dict.get("category", existing["category"])).strip())
         cost_price = float(payload_dict.get("cost_price", existing["cost_price"]))
         unit_price = float(payload_dict.get("unit_price", existing["unit_price"]))
         item_number = str(payload_dict.get("item_number", "")).strip() if payload_dict.get("item_number") else None
         unit_code = str(payload_dict.get("unit_code", existing["unit_code"])).strip().upper()
         stock_quantity = float(payload_dict.get("stock_quantity", existing["stock_quantity"]))
-        description = payload_dict.get("description", existing.get("description", ""))
+        description = html.unescape(str(payload_dict.get("description", existing.get("description", ""))).strip())
         profit_percentage = float(payload_dict.get("profit_percentage", existing["profit_percentage"]))
         additional_numbers = payload_dict.get("additional_numbers")
         is_active = bool(payload_dict.get("is_active", existing.get("is_active", True)))
@@ -177,7 +191,7 @@ class ProductService:
         # Sincronización POS
         category_code = payload_dict.get("category_code")
         department_code = payload_dict.get("department_code")
-        pos_item_id = existing.get("pos_item_id")
+        pos_item_id = existing.get("pos_item_id") or payload_dict.get("pos_item_id")
         pos_sync_res = {}
         try:
             pos_sync_res = await self.pos_service.create_or_update_pos_item({

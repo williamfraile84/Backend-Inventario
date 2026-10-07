@@ -180,6 +180,7 @@ class ProductCreateRequest(BaseModel):
     
     # Números adicionales de artículos (múltiples códigos alternativos)
     additional_numbers: Optional[List[str]] = Field(default_factory=list, description="Códigos de barra adicionales")
+    pos_item_id: Optional[str] = Field(None, description="ID interno en CSOPOS si ya existe")
 
 class ProductUpdateRequest(BaseModel):
     item_number: Optional[str] = Field(None, max_length=50)
@@ -194,7 +195,23 @@ class ProductUpdateRequest(BaseModel):
     description: Optional[str] = None
     profit_percentage: float = Field(30.0)
     additional_numbers: Optional[List[str]] = Field(default_factory=list)
+    pos_item_id: Optional[str] = Field(None, description="ID interno en CSOPOS si ya existe")
     is_active: bool = True
+
+class PosItemDetailResponse(BaseModel):
+    item_id: str
+    name: str
+    item_number: Optional[str] = None
+    category: str = "General"
+    category_code: Optional[str] = None
+    cost_price: float = 0.0
+    unit_price: float = 0.0
+    formatted_sale_price: Optional[str] = None
+    unit_code: str = "UN"
+    stock_quantity: float = 0.0
+    description: Optional[str] = ""
+    profit_percentage: float = 30.0
+    additional_numbers: List[str] = Field(default_factory=list)
 
 class ProductDetailResponse(BaseModel):
     id: int

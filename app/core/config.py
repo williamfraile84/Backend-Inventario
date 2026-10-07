@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     POS_PRIMARY_URL: str = "https://csopos.co/"
     POS_SECONDARY_URL: str = "https://softwarepos.online/"
     POS_USER: str = "caja1"
-    POS_PASS: str = "caja12345"
+    POS_PASS: str = "pass"
     POS_STORE: str = "yanuba"
     POS_REGISTER_NUM: int = 1
     POS_HEADLESS: bool = True
@@ -111,7 +111,8 @@ class Settings(BaseSettings):
     CONFIDENCE_FALLBACK_THRESHOLD: float = 0.70
     DIAN_RECEPTOR_NIT: str = "40327379"
     DIAN_PORTAL_TIMEOUT_SECONDS: int = 25
-    DIAN_HEADLESS_BROWSER: bool = True
+    DIAN_HEADLESS_BROWSER: bool = False
+    DIAN_BROWSER_CHANNEL: str = "chrome"
 
     @property
     def effective_database_url(self) -> str:
