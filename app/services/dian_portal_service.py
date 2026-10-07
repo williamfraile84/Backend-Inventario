@@ -4,6 +4,7 @@ import io
 import os
 import re
 import time
+import subprocess
 from typing import Dict, Any, Optional
 
 try:
@@ -103,8 +104,33 @@ class DIANPortalService:
         browser = None
         try:
             with sync_playwright() as p:
-                headless_mode = getattr(settings, "DIAN_HEADLESS_BROWSER", False)
+                configured_headless = getattr(settings, "DIAN_HEADLESS_BROWSER", False)
                 preferred_channel = getattr(settings, "DIAN_BROWSER_CHANNEL", "chrome")
+
+                # Si se solicita modo headed (gráfica visible) en Linux (Render/Docker)
+                if sys.platform.startswith("linux") and not configured_headless:
+                    display = os.environ.get("DISPLAY", ":99")
+                    os.environ["DISPLAY"] = display
+                    socket_path = f"/tmp/.X11-unix/X{display.replace(':', '')}"
+                    if not os.path.exists(socket_path):
+                        logger.info(f"Iniciando servidor gráfico virtual Xvfb en {display}...")
+                        try:
+                            os.makedirs("/tmp/.X11-unix", exist_ok=True)
+                            subprocess.Popen(
+                                ["Xvfb", display, "-screen", "0", "1366x768x24", "-ac", "-noreset", "+extension", "GLX", "+render"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            for _ in range(15):
+                                time.sleep(0.2)
+                                if os.path.exists(socket_path):
+                                    logger.info(f"Servidor Xvfb listo en {socket_path}")
+                                    break
+                        except Exception as e_xvfb:
+                            logger.warning(f"Aviso al iniciar Xvfb: {e_xvfb}")
+                    headless_mode = False
+                else:
+                    headless_mode = configured_headless
 
                 launch_kwargs = {
                     "headless": headless_mode,
@@ -112,8 +138,11 @@ class DIANPortalService:
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
-                        "--window-size=1280,800"
-                    ]
+                        "--disable-infobars",
+                        "--window-size=1366,768",
+                        "--start-maximized"
+                    ],
+                    "ignore_default_args": ["--enable-automation"]
                 }
 
                 # Determinar canales de navegador a intentar según el sistema operativo
@@ -137,8 +166,18 @@ class DIANPortalService:
                         kw = dict(launch_kwargs)
                         if ch:
                             kw["channel"] = ch
-                        browser = p.chromium.launch(**kw)
-                        logger.info(f"Navegador Playwright lanzado con canal: {ch or 'chromium estándar'}")
+                        try:
+                            browser = p.chromium.launch(**kw)
+                        except Exception as e_launch:
+                            err_str = str(e_launch)
+                            if ("Missing X server" in err_str or "XServer" in err_str or "DISPLAY" in err_str or "closed" in err_str) and not kw.get("headless"):
+                                logger.warning(f"Modo con interfaz falló en el servidor ({err_str}). Reintentando automáticamente con headless=True...")
+                                kw["headless"] = True
+                                browser = p.chromium.launch(**kw)
+                            else:
+                                raise e_launch
+
+                        logger.info(f"Navegador Playwright lanzado con canal: {ch or 'chromium estándar'} (headless={kw.get('headless')})")
                         break
                     except Exception as e_ch:
                         last_launch_err = e_ch
@@ -150,15 +189,15 @@ class DIANPortalService:
                 context = browser.new_context(
                     accept_downloads=True,
                     viewport={"width": 1366, "height": 768},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    screen={"width": 1366, "height": 768},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                     locale="es-CO",
                     timezone_id="America/Bogota"
                 )
                 context.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                    Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es', 'en-US', 'en']});
-                    window.chrome = { runtime: {} };
+                    if (!window.chrome) {
+                        window.chrome = { runtime: {} };
+                    }
                 """)
 
                 page = context.new_page()
@@ -182,13 +221,15 @@ class DIANPortalService:
                     browser.close()
                     return result
 
-                # 2. Asegurar campo NIT diligenciado
-                page.click("#SearchDocumentNit")
-                page.fill("#SearchDocumentNit", effective_nit)
+                # 2. Asegurar campo NIT diligenciado usando pulsaciones realistas
+                nit_input = page.locator("#SearchDocumentNit")
+                nit_input.click()
+                nit_input.fill("")
+                nit_input.press_sequentially(effective_nit, delay=35)
 
-                # 3. Esperar validación automática o interactiva de Turnstile
+                # 3. Esperar validación automática o asistida de Turnstile
                 token_found = False
-                for s in range(1, 8):
+                for s in range(1, 6):
                     time.sleep(1)
                     cf_token = page.evaluate(
                         "() => document.querySelector('[name=cf-turnstile-response]')?.value || document.querySelector('[name=g-recaptcha-response]')?.value || ''"
@@ -200,33 +241,30 @@ class DIANPortalService:
 
                 # Asistir clic en widget Turnstile si aún no se completó
                 if not token_found:
-                    logger.info("Asistiendo clic interactivo en widget Turnstile...")
+                    logger.info("Asistiendo interacción con widget Turnstile...")
 
                     # Método A: Intentar interacción directa mediante frame_locator
                     try:
-                        t_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
-                        t_box = t_frame.locator("input[type=checkbox], .ctp-checkbox-label, #challenge-stage, body").first
-                        if t_box.is_visible(timeout=2500):
-                            t_box.click(force=True, timeout=2500)
+                        t_frame = page.frame_locator(".cf-turnstile iframe, iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
+                        t_box = t_frame.locator("input[type=checkbox], label, #challenge-stage, body").first
+                        if t_box.is_visible(timeout=3000):
+                            t_box.click(force=True, timeout=3000)
                             logger.info("Clic interactivo ejecutado vía frame_locator en checkbox Turnstile.")
                     except Exception as e_fl:
                         logger.debug(f"Aviso en frame_locator: {e_fl}")
 
                     # Método B: Clic con trayectoria de ratón sobre coordenadas físicas del widget
                     try:
-                        for f in page.frames:
-                            if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
-                                fe = f.frame_element()
-                                fe.scroll_into_view_if_needed(timeout=2000)
-                                b = fe.bounding_box()
-                                if b:
-                                    target_x = b['x'] + 35
-                                    target_y = b['y'] + (b['height'] / 2 if b['height'] > 20 else 32)
-                                    page.mouse.move(target_x, target_y, steps=15)
-                                    time.sleep(0.3)
-                                    page.mouse.click(target_x, target_y)
-                                    logger.info(f"Clic con mouse ejecutado en widget ({target_x:.0f}, {target_y:.0f}).")
-                                break
+                        container = page.locator(".cf-turnstile").first
+                        if container.is_visible(timeout=2000):
+                            b = container.bounding_box()
+                            if b:
+                                target_x = b['x'] + 30
+                                target_y = b['y'] + (b['height'] / 2 if b['height'] > 20 else 35)
+                                page.mouse.move(target_x, target_y, steps=15)
+                                time.sleep(0.2)
+                                page.mouse.click(target_x, target_y)
+                                logger.info(f"Clic con mouse ejecutado en widget ({target_x:.0f}, {target_y:.0f}).")
                     except Exception as e_click:
                         logger.debug(f"Aviso en clic asistido con coordenadas: {e_click}")
 

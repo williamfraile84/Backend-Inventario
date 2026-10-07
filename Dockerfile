@@ -33,6 +33,6 @@ COPY . /app/
 # Exponer el puerto por defecto
 EXPOSE 8000
 
-# Iniciar Xvfb en background con pantalla virtual persistente y arrancar uvicorn como proceso principal
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -ac -noreset > /dev/null 2>&1 & exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Asegurar socket X11 limpio, iniciar pantalla virtual Xvfb y arrancar uvicorn
+CMD ["sh", "-c", "mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix && rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 && Xvfb :99 -screen 0 1366x768x24 -ac +extension GLX +render -noreset & sleep 1 && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
