@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     DIAN_PORTAL_TIMEOUT_SECONDS: int = 25
     DIAN_HEADLESS_BROWSER: bool = False
     DIAN_BROWSER_CHANNEL: str = "chrome"
+    DIAN_AUTO_PORTAL_FETCH: bool = True
 
     @property
     def effective_database_url(self) -> str:

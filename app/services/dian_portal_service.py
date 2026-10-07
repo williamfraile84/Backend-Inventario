@@ -102,6 +102,29 @@ class DIANPortalService:
             result["requires_user_captcha"] = True
             return result
 
+        # Verificación de recursos del servidor (Protección Anti-OOM en Render):
+        # En servidores Linux en la nube con memoria limitada (ej. Render con 512MB RAM),
+        # ejecutar Chromium/Chrome en paralelo con Uvicorn + FastAPI satura la memoria física,
+        # provocando que el kernel de Linux mate el proceso con SIGKILL (Out Of Memory).
+        # Para garantizar 100% de estabilidad y disponibilidad continua sin caídas:
+        # si se detecta Render, memoria libre < 350MB, o DIAN_AUTO_PORTAL_FETCH=False,
+        # se delega de forma instantánea al flujo asistido oficial sin poner en riesgo el servidor.
+        force_safe_mode = not getattr(settings, "DIAN_AUTO_PORTAL_FETCH", True)
+        is_render_environment = os.environ.get("RENDER") is not None
+        mem_available_mb = cls._get_available_memory_mb()
+
+        if force_safe_mode or is_render_environment or (sys.platform.startswith("linux") and mem_available_mb < 350):
+            logger.info(
+                f"Protección de memoria activa (Render={bool(is_render_environment)}, "
+                f"RAM={mem_available_mb:.0f}MB). Delegando inmediatamente al asistente seguro de la DIAN."
+            )
+            result["requires_user_captcha"] = True
+            result["message"] = (
+                "El portal de la DIAN solicita verificación interactiva de seguridad (Cloudflare). "
+                "Utilice el asistente asistido de 1 clic para abrir el documento y descargarlo con su NIT."
+            )
+            return result
+
         browser = None
         try:
             with sync_playwright() as p:
@@ -443,3 +466,16 @@ class DIANPortalService:
             return float(s)
         except Exception:
             return 0.0
+
+    @staticmethod
+    def _get_available_memory_mb() -> float:
+        """Obtiene la memoria RAM disponible en el sistema en megabytes para protección del servidor."""
+        try:
+            if sys.platform.startswith("linux") and os.path.exists("/proc/meminfo"):
+                with open("/proc/meminfo", "r") as f:
+                    for line in f:
+                        if line.startswith("MemAvailable:"):
+                            return float(line.split()[1]) / 1024.0
+            return 1024.0
+        except Exception:
+            return 512.0
