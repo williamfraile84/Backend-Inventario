@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api"
     SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
+    PORT: Optional[int] = None
+
+    @field_validator("SERVER_PORT", mode="before")
+    @classmethod
+    def resolve_server_port(cls, v):
+        port_env = os.getenv("PORT")
+        if port_env:
+            try:
+                return int(port_env)
+            except ValueError:
+                pass
+        return v or 8000
 
     # ==========================================
     # Base de Datos Agnóstica (PostgreSQL/Supabase, SQLite, MySQL, Oracle)

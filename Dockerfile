@@ -6,6 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DIAN_HEADLESS_BROWSER=false \
+    DISPLAY=:99 \
     PYTHONPATH=/app
 
 WORKDIR /app
@@ -32,6 +33,6 @@ COPY . /app/
 # Exponer el puerto por defecto
 EXPOSE 8000
 
-# Arrancar uvicorn envuelto en xvfb-run para proveer una pantalla virtual real de 1280x800
-CMD ["sh", "-c", "exec xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24 -ac' uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Iniciar Xvfb en background con pantalla virtual persistente y arrancar uvicorn como proceso principal
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -ac -noreset > /dev/null 2>&1 & exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
