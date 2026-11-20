@@ -913,9 +913,20 @@ class POSService:
             return []
         dep_code = department_code.strip()
 
-        # 1. Catálogo local pre-indexado (0ms)
-        if _LOCAL_CATALOG and dep_code in _LOCAL_CATALOG:
-            cats = _LOCAL_CATALOG[dep_code].get("categories", [])
+        # 1. Catálogo local pre-indexado (0ms instantáneo)
+        norm_code = dep_code.upper()
+        if not norm_code.startswith("D") and norm_code.isdigit():
+            norm_code = f"D{norm_code.zfill(2)}"
+
+        target_dep = norm_code if (_LOCAL_CATALOG and norm_code in _LOCAL_CATALOG) else (dep_code if (_LOCAL_CATALOG and dep_code in _LOCAL_CATALOG) else None)
+        if not target_dep and _LOCAL_CATALOG:
+            for k, v in _LOCAL_CATALOG.items():
+                if v.get("department_name", "").strip().lower() == dep_code.lower():
+                    target_dep = k
+                    break
+
+        if _LOCAL_CATALOG and target_dep:
+            cats = _LOCAL_CATALOG[target_dep].get("categories", [])
             if cats:
                 return cats
 
@@ -923,36 +934,35 @@ class POSService:
         if dep_code in self._categories_by_dep_cache:
             return self._categories_by_dep_cache[dep_code]
 
-        # 3. Fallback HTTP al POS
-        for attempt in range(2):
-            try:
-                if not self.is_initialized or not self.http_client:
-                    await self.initialize()
+        # Si no hay credenciales POS configuradas, retornar de inmediato (0ms) sin bloquear
+        if not self.pos_user or not self.pos_pass:
+            return []
 
-                url = f"{self.base_url}index.php/category/get_categories_by_department?department={dep_code}"
-                r = await self.http_client.get(url, timeout=6.0)
-                if r.status_code == 200:
-                    await self._ensure_logged_in(r)
-                    raw_data = r.json()
-                    results = []
-                    for item in raw_data:
-                        if isinstance(item, dict) and "code" in item and "name" in item:
-                            results.append({
-                                "code": str(item["code"]).strip(),
-                                "name": clean_pos_text(str(item["name"])),
-                                "department_code": dep_code,
-                                "department_name": clean_pos_text(POS_DEPARTMENTS.get(dep_code, ""))
-                            })
-                    self._categories_by_dep_cache[dep_code] = results
-                    return results
-                return []
-            except Exception as e:
-                if attempt == 0:
-                    await self.ensure_active_domain(force_switch=True)
-                    await self._login_direct()
-                else:
-                    logger.warning(f"Error consultando categorías de departamento {dep_code}: {e}")
-                    return []
+        # 3. Fallback HTTP al POS con timeout no bloqueante
+        try:
+            if not self.is_initialized or not self.http_client:
+                await asyncio.wait_for(self.initialize(), timeout=2.0)
+
+            url = f"{self.base_url}index.php/category/get_categories_by_department?department={dep_code}"
+            r = await self.http_client.get(url, timeout=3.0)
+            if r.status_code == 200:
+                await self._ensure_logged_in(r)
+                raw_data = r.json()
+                results = []
+                for item in raw_data:
+                    if isinstance(item, dict) and "code" in item and "name" in item:
+                        results.append({
+                            "code": str(item["code"]).strip(),
+                            "name": clean_pos_text(str(item["name"])),
+                            "department_code": dep_code,
+                            "department_name": clean_pos_text(POS_DEPARTMENTS.get(dep_code, ""))
+                        })
+                self._categories_by_dep_cache[dep_code] = results
+                return results
+            return []
+        except Exception as e:
+            logger.warning(f"Aviso consultando categorías de departamento {dep_code}: {e}")
+            return []
 
     async def search_categories_pos(self, term: str) -> List[Dict[str, Any]]:
         """Búsqueda global y rápida de categorías en catálogo local y POS con autocompletado omnidireccional."""
@@ -983,40 +993,39 @@ class POSService:
         if local_results:
             return local_results
 
-        # 2. Fallback a POS externo
-        for attempt in range(2):
-            try:
-                if not self.is_initialized or not self.http_client:
-                    await self.initialize()
+        # Si no hay credenciales POS configuradas, retornar resultados locales de inmediato sin bloquear
+        if not self.pos_user or not self.pos_pass:
+            return local_results
 
-                url = f"{self.base_url}index.php/category/categories_shop?term={term.strip()}"
-                r = await self.http_client.get(url, timeout=5.0)
-                if r.status_code == 200:
-                    await self._ensure_logged_in(r)
-                    raw_data = r.json()
-                    out = []
-                    for row in raw_data:
-                        data_obj = row.get("data") or {}
-                        cat_code = data_obj.get("categoria_code") or ""
-                        cat_name = clean_pos_text(data_obj.get("categoria") or row.get("value") or "")
-                        dep_code = data_obj.get("departament_code") or ""
-                        dep_name = clean_pos_text(data_obj.get("departament") or POS_DEPARTMENTS.get(dep_code, ""))
-                        if cat_code or cat_name:
-                            out.append({
-                                "code": cat_code,
-                                "name": cat_name,
-                                "department_code": dep_code,
-                                "department_name": dep_name
-                            })
-                    return out
-                return []
-            except Exception as e:
-                if attempt == 0:
-                    await self.ensure_active_domain(force_switch=True)
-                    await self._login_direct()
-                else:
-                    logger.warning(f"Error buscando categorías para {term}: {e}")
-                    return []
+        # 2. Fallback a POS externo con timeout acotado
+        try:
+            if not self.is_initialized or not self.http_client:
+                await asyncio.wait_for(self.initialize(), timeout=2.0)
+
+            url = f"{self.base_url}index.php/category/categories_shop?term={term.strip()}"
+            r = await self.http_client.get(url, timeout=3.0)
+            if r.status_code == 200:
+                await self._ensure_logged_in(r)
+                raw_data = r.json()
+                out = []
+                for row in raw_data:
+                    data_obj = row.get("data") or {}
+                    cat_code = data_obj.get("categoria_code") or ""
+                    cat_name = clean_pos_text(data_obj.get("categoria") or row.get("value") or "")
+                    dep_code = data_obj.get("departament_code") or ""
+                    dep_name = clean_pos_text(data_obj.get("departament") or POS_DEPARTMENTS.get(dep_code, ""))
+                    if cat_code or cat_name:
+                        out.append({
+                            "code": cat_code,
+                            "name": cat_name,
+                            "department_code": dep_code,
+                            "department_name": dep_name
+                        })
+                return out
+            return []
+        except Exception as e:
+            logger.warning(f"Aviso buscando categorías externas para {term}: {e}")
+            return local_results
 
     async def resolve_category_code(self, category_text_or_code: str, department_code: Optional[str] = None) -> Tuple[str, str]:
         """Resuelve el código interno C... requerido por el POS y su departamento."""
