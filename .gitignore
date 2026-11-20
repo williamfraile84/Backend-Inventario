@@ -1,0 +1,74 @@
+# ==============================================================================
+# GITIGNORE - FRUVER POS BACKEND (FastAPI / Python / SQLAlchemy)
+# ==============================================================================
+
+# Entornos Virtuales
+.venv/
+venv/
+venv*/
+env/
+ENV/
+*.py[cod]
+*$py.class
+__pycache__/
+*.so
+.Python
+
+# Variables de Entorno y Secretos
+.env
+.env.*
+!.env.example
+*.env.local
+
+# Bases de Datos Locales (SQLite WAL/SHM)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+fruver_pos.db*
+backups/*
+!backups/.gitkeep
+
+# Almacenamiento Local de Facturas y Temporales
+storage/invoices/*
+!storage/invoices/.gitkeep
+storage/exports/*
+!storage/exports/.gitkeep
+storage/temp/*
+!storage/temp/.gitkeep
+temp/
+scratch/
+**/dian_browser_profile/**
+
+# Modelos Pesados de OCR / IA (ONNX, PyTorch, etc.)
+models_ocr/*
+!models_ocr/.gitkeep
+*.onnx
+*.pt
+*.pth
+*.bin
+*.weights
+
+# Pruebas y Cobertura
+.pytest_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.tox/
+
+# Logs y Artefactos Temporales
+*.log
+logs/
+*.tmp
+*.bak
+*.rar
+*.zip
+
+# Editores y Sistema Operativo
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
