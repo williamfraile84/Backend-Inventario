@@ -170,7 +170,7 @@ class POSService:
             ctx.verify_mode = ssl.CERT_NONE
 
             def _check():
-                with urllib.request.urlopen(req, timeout=2.0, context=ctx) as resp:
+                with urllib.request.urlopen(req, timeout=1.5, context=ctx) as resp:
                     return resp.status in (200, 301, 302, 303)
 
             return await asyncio.to_thread(_check)
@@ -283,6 +283,11 @@ class POSService:
     # -------------------------------------------------------------------------
     async def initialize(self):
         """Inicia el motor HTTP persistente y autentica la sesión de alta velocidad."""
+        if not self.pos_user or not self.pos_pass:
+            logger.info("ℹ️ Credenciales POS no configuradas; operando en modo local (catálogo pre-indexado).")
+            self.is_initialized = False
+            return
+
         async with self._init_lock:
             if self.is_initialized and self.http_client:
                 return
@@ -324,7 +329,7 @@ class POSService:
                 "password": settings.POS_PASS,
                 "store": settings.POS_STORE
             }
-            resp = await self.http_client.post(login_url, data=login_data, timeout=10.0)
+            resp = await self.http_client.post(login_url, data=login_data, timeout=3.5)
             if resp.status_code == 200:
                 self._last_active_ts = time.time()
                 logger.info(f"✅ Autenticación directa completada en {self.base_url}")
