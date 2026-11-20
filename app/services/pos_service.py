@@ -136,6 +136,9 @@ class POSService:
         self.primary_url = settings.POS_PRIMARY_URL.rstrip('/') + '/'
         self.secondary_url = settings.POS_SECONDARY_URL.rstrip('/') + '/'
         self.base_url = self.primary_url
+        self.pos_user = settings.POS_USER
+        self.pos_pass = settings.POS_PASS
+        self.pos_store = settings.POS_STORE
 
         # Caché de alta velocidad en memoria (TTL: 5 minutos)
         self._product_cache: Dict[str, Tuple[ProductLookupResponse, float]] = {}
@@ -283,9 +286,10 @@ class POSService:
     # -------------------------------------------------------------------------
     async def initialize(self):
         """Inicia el motor HTTP persistente y autentica la sesión de alta velocidad."""
-        if not self.pos_user or not self.pos_pass:
+        if not getattr(self, "pos_user", None) or not getattr(self, "pos_pass", None):
             logger.info("ℹ️ Credenciales POS no configuradas; operando en modo local (catálogo pre-indexado).")
             self.is_initialized = False
+            self.last_error = None
             return
 
         async with self._init_lock:
@@ -299,6 +303,7 @@ class POSService:
                 logger.info(f"⚡ Iniciando motor HTTP de alta velocidad en {self.base_url}...")
                 await self._login_direct()
                 self.is_initialized = True
+                self.last_error = None
                 self._last_active_ts = time.time()
 
                 # Iniciar tarea periódica de heartbeat para mantener la sesión siempre lista
@@ -332,6 +337,8 @@ class POSService:
             resp = await self.http_client.post(login_url, data=login_data, timeout=3.5)
             if resp.status_code == 200:
                 self._last_active_ts = time.time()
+                self.is_initialized = True
+                self.last_error = None
                 logger.info(f"✅ Autenticación directa completada en {self.base_url}")
                 return True
             raise RuntimeError(f"Fallo de inicio de sesión POS (HTTP {resp.status_code})")
