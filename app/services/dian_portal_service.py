@@ -78,8 +78,8 @@ class DIANPortalService:
         effective_nit = (nit or getattr(settings, "DIAN_RECEPTOR_NIT", "") or "").strip()
         effective_nit = re.sub(r"\D", "", effective_nit)
         search_url = cls.get_search_url(clean_key)
-        configured_timeout = int(getattr(settings, "DIAN_PORTAL_TIMEOUT_SECONDS", 30))
-        timeout_sec = min(max(int(timeout_seconds or configured_timeout), 15), 45)
+        configured_timeout = int(getattr(settings, "DIAN_PORTAL_TIMEOUT_SECONDS", 45))
+        timeout_sec = min(max(int(timeout_seconds or configured_timeout), 15), 60)
 
         logger.info(f"Iniciando consulta desatendida en portal DIAN para CUFE {clean_key[:16]}... con NIT {effective_nit} (Timeout: {timeout_sec}s)")
 
@@ -275,7 +275,7 @@ class DIANPortalService:
                 token_found = False
                 token_1 = ""
                 poll_interval = 0.25
-                max_turnstile_wait = min(max(int(timeout_sec) - 6, 15), 25)
+                max_turnstile_wait = min(max(int(timeout_sec) - 6, 15), 35)
                 max_iterations = int(max_turnstile_wait / poll_interval)
                 logger.info(f"Esperando validación nativa de Cloudflare Turnstile (hasta {max_turnstile_wait}s)...")
                 for s in range(1, max_iterations + 1):
@@ -333,17 +333,21 @@ class DIANPortalService:
                 result["metadata"] = meta
 
                 # 7. Esperar validación del token secundario de Turnstile para la descarga del PDF
-                # Asegura que el token sea nuevo (diferente a token_1) para no disparar la alerta
-                # "El campo de seguridad no está completo" y ahorrar penalizaciones de 6+ segundos.
-                logger.info("Esperando token secundario de seguridad para descarga de PDF...")
-                max_sec_iterations = int(14 / poll_interval)
+                # Con tolerancia de hasta 18s (sondeo ágil cada 250ms con salida inmediata al confirmar).
+                logger.info("Esperando token secundario de seguridad para descarga de PDF (hasta 18s)...")
+                sec_token_confirmed = False
+                max_sec_iterations = int(18 / poll_interval)
                 for s in range(1, max_sec_iterations + 1):
                     time.sleep(poll_interval)
-                    t_sec = page.evaluate("() => document.querySelector('[name=cf-turnstile-response]')?.value || ''")
+                    t_sec = page.evaluate("() => document.querySelector('[name=cf-turnstile-response]')?.value || document.querySelector('[name=g-recaptcha-response]')?.value || (window.turnstile && typeof window.turnstile.getResponse === 'function' ? window.turnstile.getResponse() : '')")
                     if t_sec and len(t_sec) > 10 and t_sec != token_1:
                         elapsed_sec = s * poll_interval
                         logger.info(f"Token secundario de descarga confirmado en {elapsed_sec:.2f}s.")
+                        sec_token_confirmed = True
                         break
+
+                if not sec_token_confirmed:
+                    logger.info("Token secundario no reportó valor diferenciado antes de 18s. Intentando descarga directa con la sesión autorizada...")
 
                 # 8. [Clic 2 y 3] Descargar PDF oficial y aceptar modal
                 pdf_bytes = cls._download_pdf_from_page_sync(page)
@@ -352,7 +356,12 @@ class DIANPortalService:
                     result["pdf_bytes"] = pdf_bytes
                     result["message"] = "Factura y PDF oficial descargados exitosamente desde la DIAN."
                 else:
-                    result["message"] = "Se accedió al documento pero no se pudo descargar el archivo PDF automáticamente."
+                    logger.warning("No se pudo obtener el PDF oficial de la DIAN tras intentar la interacción de descarga.")
+                    result["requires_user_captcha"] = True
+                    result["message"] = (
+                        "El portal oficial DIAN requiere validación de seguridad interactiva para autorizar la descarga del PDF. "
+                        "Usa el botón para abrir el documento con tu NIT o pulsa 'Reintentar ahora'."
+                    )
 
                 browser.close()
                 return result
@@ -442,14 +451,14 @@ class DIANPortalService:
                             btn_cerrar.click(timeout=1000)
                         except Exception:
                             pass
-                        time.sleep(1.5)
+                        time.sleep(2.0)
                         pdf_link.first.click()
                 except Exception:
                     pass
 
                 # Esperar modal de confirmación de la DIAN ("Este archivo contiene contraseña...")
                 aceptar_btn = page.locator(
-                    ".modal.show button:has-text('Aceptar'), .bootbox button:has-text('Aceptar'), .modal button:has-text('Aceptar'), button:has-text('Aceptar')"
+                    ".modal.show button:has-text('Aceptar'), .bootbox button:has-text('Aceptar'), .modal button:has-text('Aceptar')"
                 )
                 modal_visible = False
                 try:
@@ -460,7 +469,7 @@ class DIANPortalService:
 
                 if modal_visible and aceptar_btn.count() > 0 and aceptar_btn.first.is_visible():
                     logger.info("Confirmando descarga en modal de contraseña oficial de la DIAN...")
-                    with page.expect_download(timeout=15000) as download_info:
+                    with page.expect_download(timeout=12000) as download_info:
                         aceptar_btn.first.click()
                     download = download_info.value
                     path = download.path()
@@ -470,7 +479,7 @@ class DIANPortalService:
                 else:
                     # En caso de descarga directa sin modal
                     logger.info("Esperando evento de descarga directa...")
-                    with page.expect_download(timeout=10000) as download_info:
+                    with page.expect_download(timeout=8000) as download_info:
                         pdf_link.first.click()
                     download = download_info.value
                     path = download.path()

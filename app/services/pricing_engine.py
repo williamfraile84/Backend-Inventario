@@ -58,29 +58,25 @@ def calcular_costos_item_factura(
 
     if es_modo_valor:
         monto_total_desc = float(descuento_valor) if (descuento_valor is not None and float(descuento_valor) > 0) else descuento_input
-        # Si el monto de descuento es mayor que el costo unitario original, corresponde al descuento TOTAL del renglón
-        if monto_total_desc > costo_original and cantidad > 0:
-            desc_unitario = monto_total_desc / cantidad
-        else:
-            desc_unitario = monto_total_desc
-            monto_total_desc = desc_unitario * cantidad
-
-        if operacion_final == "sumar":
-            costo_base_compra = costo_original + desc_unitario
-        else:
-            costo_base_compra = max(0.0, costo_original - desc_unitario)
-
-        descuento_pct = round((desc_unitario / costo_original * 100.0), 2) if costo_original > 0 else 0.0
+        # En facturas comerciales y oficiales DIAN, el valor monetario del descuento corresponde
+        # al descuento TOTAL de la línea para todas las unidades facturadas (Q).
+        # El descuento unitario se calcula distribuyendo el monto total entre la cantidad.
+        desc_unitario = monto_total_desc / cantidad if cantidad > 0 else monto_total_desc
+        subtotal_bruto = costo_original * cantidad
+        descuento_pct = round((monto_total_desc / subtotal_bruto * 100.0), 2) if subtotal_bruto > 0 else 0.0
         descuento_monetario = round(monto_total_desc, 2)
         modo_final = "valor"
     else:
         descuento_pct = descuento_input if operacion_final == "sumar" else min(100.0, descuento_input)
-        if operacion_final == "sumar":
-            costo_base_compra = costo_original * (1.0 + (descuento_pct / 100.0))
-        else:
-            costo_base_compra = costo_original * (1.0 - (descuento_pct / 100.0))
-        descuento_monetario = round((costo_original * cantidad) * (descuento_pct / 100.0), 2)
+        desc_unitario = round(costo_original * (descuento_pct / 100.0), 4)
+        monto_total_desc = round((costo_original * cantidad) * (descuento_pct / 100.0), 2)
+        descuento_monetario = monto_total_desc
         modo_final = "porcentaje"
+
+    if operacion_final == "sumar":
+        costo_base_compra = costo_original + desc_unitario
+    else:
+        costo_base_compra = max(0.0, costo_original - desc_unitario)
 
     if conceptos_impuestos is None:
         conceptos_impuestos = []
@@ -91,10 +87,14 @@ def calcular_costos_item_factura(
     total_impuestos_fijos_activos = 0.0
 
     for imp in conceptos_impuestos:
-        nombre = str(imp.get("nombre", "IVA")).strip().upper()
-        tasa = float(imp.get("tasa", 0.0) or 0.0)
+        nombre = str(imp.get("nombre", imp.get("name", "IVA"))).strip().upper()
+        raw_tasa = imp.get("tasa") if imp.get("tasa") is not None else (imp.get("porcentaje") if imp.get("porcentaje") is not None else imp.get("rate", 0.0))
+        tasa = float(raw_tasa or 0.0)
+        # Si la tasa fue especificada en forma decimal (ej. 0.19 en vez de 19.0)
+        if 0.0 < tasa <= 1.0:
+            tasa = round(tasa * 100.0, 4)
         aplicado = bool(imp.get("aplicado", True))
-        valor_fijo = float(imp.get("valor_fijo", 0.0) or 0.0)
+        valor_fijo = float(imp.get("valor_fijo", 0.0) or imp.get("fixed_amount", 0.0) or 0.0)
 
         if aplicado:
             total_tasa_porcentual_activa += tasa
@@ -113,7 +113,6 @@ def calcular_costos_item_factura(
         # El precio original ya tiene los impuestos incluidos:
         # Costo Base = Costo Original / (1 + (TasaTotal / 100))
         divisor = 1.0 + (total_tasa_porcentual_activa / 100.0) if total_tasa_porcentual_activa > 0 else 1.0
-        costo_base_presentacion = (costo_original - total_impuestos_fijos_activos) / divisor if divisor > 0 else costo_original
         costo_base_presentacion = (costo_base_compra - total_impuestos_fijos_activos) / divisor if divisor > 0 else costo_base_compra
         costo_base_presentacion = max(0.0, costo_base_presentacion)
 
@@ -124,11 +123,9 @@ def calcular_costos_item_factura(
                 imp["valor_calculado"] = round(val, 2)
                 total_impuestos_calculados += val
 
-        costo_neto_presentacion = costo_original
         costo_neto_presentacion = costo_base_compra
     else:
         # Los impuestos no están incluidos y deben sumarse al costo
-        costo_base_presentacion = costo_original
         costo_base_presentacion = costo_base_compra
         total_impuestos_calculados = 0.0
         for imp in impuestos_procesados:
@@ -143,6 +140,16 @@ def calcular_costos_item_factura(
     total_unidades_inventario = round(cantidad * unidades_por_presentacion, 3)
     costo_unitario_inventario = costo_neto_presentacion / unidades_por_presentacion if unidades_por_presentacion > 0 else costo_neto_presentacion
 
+    # 4 Desgloses totales de compra (con y sin impuestos, sumando y restando descuento):
+    total_sin_imp_menos_dcto = round(costo_base_presentacion * cantidad, 2)
+    total_con_imp_menos_dcto = round(costo_neto_presentacion * cantidad, 2)
+
+    # Base comercial plena sin descuento (+ Dcto):
+    base_plena_sin_imp = (costo_original - total_impuestos_fijos_activos) / divisor if iva_incluido and divisor > 0 else costo_original
+    imp_plenos = sum((base_plena_sin_imp * (imp["tasa"] / 100.0) + imp["valor_fijo"]) for imp in impuestos_procesados if imp["aplicado"]) if not iva_incluido else 0.0
+    total_sin_imp_mas_dcto = round(base_plena_sin_imp * cantidad, 2)
+    total_con_imp_mas_dcto = round((base_plena_sin_imp + imp_plenos) * cantidad, 2)
+
     # Cálculo del precio de venta final
     if precio_venta_manual is not None and float(precio_venta_manual) > 0:
         precio_venta_calculado = float(precio_venta_manual)
@@ -155,14 +162,14 @@ def calcular_costos_item_factura(
 
     return {
         "costo_compra_original": round(costo_original, 2),
-        "descuento": round(descuento, 2),
+        "descuento": round(descuento_pct, 2),
         "cantidad_presentacion": cantidad,
         "presentacion": presentacion,
         "unidades_por_presentacion": unidades_por_presentacion,
         "total_unidades_inventario": total_unidades_inventario,
-        "descuento": descuento_pct,
-        "descuento_porcentaje": descuento_pct,
-        "descuento_valor": descuento_monetario,
+        "descuento_porcentaje": round(descuento_pct, 2),
+        "descuento_valor": round(descuento_monetario, 2),
+        "descuento_unitario": round(desc_unitario, 2),
         "modo_descuento": modo_final,
         "operacion_descuento": operacion_final,
         "iva_incluido": iva_incluido,
@@ -174,7 +181,11 @@ def calcular_costos_item_factura(
         "porcentaje_margen": round(margen_real, 2),
         "precio_venta_calculado": round(precio_venta_calculado, 2),
         "precio_venta_final": int(precio_venta_final),
-        "base_redondeo": base_redondeo
+        "base_redondeo": base_redondeo,
+        "total_sin_impuestos_menos_descuento": total_sin_imp_menos_dcto,
+        "total_con_impuestos_menos_descuento": total_con_imp_menos_dcto,
+        "total_sin_impuestos_mas_descuento": total_sin_imp_mas_dcto,
+        "total_con_impuestos_mas_descuento": total_con_imp_mas_dcto
     }
 
 

@@ -7,8 +7,8 @@ Descarga los pesos neuronales del modelo Server PP-OCRv4 (ONNX, ~90.5 MB)
 para el reconocimiento de texto y facturas de alta precisión.
 
 Uso:
-    python backend/scripts/download_models.py
-    python backend/scripts/download_models.py --force
+    python scripts/download_models.py
+    python scripts/download_models.py --force
 """
 
 import os

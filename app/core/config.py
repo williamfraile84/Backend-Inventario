@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     OCR_ENABLE_PERSPECTIVE_WARP: bool = True
     CONFIDENCE_FALLBACK_THRESHOLD: float = 0.70
     DIAN_RECEPTOR_NIT: str = ""
-    DIAN_PORTAL_TIMEOUT_SECONDS: int = 40
+    DIAN_PORTAL_TIMEOUT_SECONDS: int = 45
     DIAN_HEADLESS_BROWSER: bool = False
     DIAN_BROWSER_CHANNEL: str = "chrome"
     DIAN_AUTO_PORTAL_FETCH: bool = True

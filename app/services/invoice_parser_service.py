@@ -379,6 +379,21 @@ class XMLInvoiceEngine(BaseVisionEngine):
                     "valor_calculado": t_val
                 })
 
+            # Descuentos en la línea (cac:AllowanceCharge con ChargeIndicator = false)
+            line_discount_val = 0.0
+            line_discount_pct = 0.0
+            for ac_node in line.findall(".//cac:AllowanceCharge", namespaces):
+                charge_ind = (find_text(ac_node, "cbc:ChargeIndicator") or "false").lower() == "true"
+                if not charge_ind:
+                    ac_amt = parse_numeric(find_text(ac_node, "cbc:Amount"))
+                    ac_pct = parse_numeric(find_text(ac_node, "cbc:MultiplierFactorNumeric"))
+                    line_discount_val += ac_amt
+                    if ac_pct > 0:
+                        line_discount_pct = ac_pct
+
+            if line_discount_val > 0 and line_subtotal > 0 and line_discount_pct == 0.0:
+                line_discount_pct = round((line_discount_val / (line_subtotal + line_discount_val)) * 100.0, 2)
+
             line_total = line_subtotal + sum(t["valor_calculado"] for t in taxes if not t["valor_fijo"])
 
             items.append({
@@ -394,7 +409,10 @@ class XMLInvoiceEngine(BaseVisionEngine):
                 "unidades_por_presentacion": equiv,
                 "precio_unitario": unit_price if unit_price > 0 else (line_subtotal / cant if cant > 0 else 0.0),
                 "subtotal": line_subtotal,
-                "descuento": 0.0,
+                "descuento": line_discount_pct,
+                "descuento_porcentaje": line_discount_pct,
+                "descuento_valor": line_discount_val,
+                "modo_descuento": "valor" if line_discount_val > 0 else "porcentaje",
                 "impuestos": taxes,
                 "total": line_total + sum(t["valor_fijo"] for t in taxes),
                 "iva_incluido": False,
@@ -1105,9 +1123,10 @@ class PDFInvoiceEngine(BaseVisionEngine):
                     margen_pct = settings.DEFAULT_PROFIT_MARGIN
                     tot_imp_calc = 0.0
 
-                    descuento_pct = 0.0
-                    descuento_monto = descuento_val
-                    modo_desc = "valor" if descuento_val > 100.0 else "porcentaje"
+                    descuento_monto = float(descuento_val or 0.0)
+                    subt_bruto = round(cant * p_unit, 2)
+                    descuento_pct = round((descuento_monto / subt_bruto * 100.0), 2) if subt_bruto > 0 and descuento_monto > 0 else 0.0
+                    modo_desc = "valor" if descuento_monto > 0 else "porcentaje"
 
                     try:
                         calc_fin = calcular_costos_item_factura(
@@ -1115,9 +1134,10 @@ class PDFInvoiceEngine(BaseVisionEngine):
                             cantidad=cant,
                             presentacion=pres,
                             unidades_por_presentacion=equiv,
-                            descuento=descuento_val,
-                            descuento_valor=descuento_val if descuento_val > 0 else 0.0,
+                            descuento=descuento_pct,
+                            descuento_valor=descuento_monto if descuento_monto > 0 else 0.0,
                             modo_descuento=modo_desc,
+                            operacion_descuento="restar",
                             iva_incluido=False,
                             conceptos_impuestos=tax_objs,
                             porcentaje_margen=settings.DEFAULT_PROFIT_MARGIN,

@@ -2,8 +2,11 @@ import asyncio
 import io
 import logging
 import os
+import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, status
 from fastapi.responses import Response, JSONResponse
@@ -43,98 +46,306 @@ router = APIRouter(prefix="/invoices", tags=["Lectura y Procesamiento de Factura
 # Permite desacoplar peticiones de larga duración y evitar timeouts de 30s en túneles (tunnl.gg)
 INVOICE_TASKS: Dict[str, Dict[str, Any]] = {}
 
+# Mapeo de abreviaturas frecuentes en facturas colombianas para normalización fonética y semántica
+INVOICE_ABBREVIATIONS = {
+    "cza": "cereza",
+    "fre": "fresa",
+    "mor": "mora",
+    "meloc": "melocoton",
+    "mel": "melocoton",
+    "nat": "natural",
+    "q": "queso",
+    "yog": "yogurt",
+    "fts": "frutos",
+    "orig": "original",
+    "rgn": "regeneris",
+    "zuc": "zucaritas",
+    "alm": "almendras",
+    "manz": "manzana",
+    "nar": "naranja",
+    "vain": "vainilla",
+    "choc": "chocolate",
+    "prem": "premio",
+    "descr": "descremado",
+    "vas": "vaso",
+    "bot": "botella",
+    "caj": "caja"
+}
+
+INVOICE_STOPWORDS = {"de", "la", "el", "los", "las", "con", "en", "por", "para", "un", "una", "del", "al"}
+
+INVOICE_FLAVORS = {
+    "fresa", "mora", "cereza", "naranja", "limon", "vainilla",
+    "chocolate", "melocoton", "maracuya", "arequipe", "natural",
+    "manzana", "uva", "pera", "coco", "frutos"
+}
+
+def _clean_product_tokens(text: str) -> List[str]:
+    if not text:
+        return []
+    s = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode("ascii").lower()
+    raw = re.findall(r'[a-z0-9]+', s)
+    tokens = []
+    for r in raw:
+        if r in INVOICE_STOPWORDS:
+            continue
+        if len(r) == 1 and r != "q":
+            continue
+        tokens.append(INVOICE_ABBREVIATIONS.get(r, r))
+    return tokens
+
+def _token_match_metrics(tokens1: List[str], tokens2: List[str]):
+    if not tokens1 or not tokens2:
+        return 0, 0.0
+    s1 = set(tokens1)
+    s2 = set(tokens2)
+    matches = 0.0
+    matched_words = 0
+    for t1 in s1:
+        if t1 in s2:
+            matches += 1.0
+            matched_words += 1
+        elif len(t1) >= 3 and any(t2.startswith(t1) or t1.startswith(t2) for t2 in s2 if len(t2) >= 3):
+            matches += 0.9
+            matched_words += 1
+    union_len = len(s1.union(s2))
+    jaccard = matches / union_len if union_len > 0 else 0.0
+    return matched_words, jaccard
+
+def _compute_product_similarity(desc1: str, desc2: str) -> float:
+    t1 = _clean_product_tokens(desc1)
+    t2 = _clean_product_tokens(desc2)
+    matched_words, jaccard = _token_match_metrics(t1, t2)
+    if matched_words == 0:
+        return 0.0
+    s1 = " ".join(t1)
+    s2 = " ".join(t2)
+    seq = SequenceMatcher(None, s1, s2).ratio()
+    base_sim = max(jaccard, seq, jaccard * 0.7 + seq * 0.3)
+
+    # Penalizar sabores en conflicto (ej: factura fresa vs producto mora)
+    f1 = set(t1).intersection(INVOICE_FLAVORS)
+    f2 = set(t2).intersection(INVOICE_FLAVORS)
+    if f1 and f2 and not f1.intersection(f2):
+        base_sim = max(0.0, base_sim - 0.5)
+
+    return base_sim
+
 async def enrich_items_with_pos_and_dian_conversion(items: List[Dict[str, Any]], pos_service: POSService) -> None:
     """
     Enriquece los ítems con coincidencias del catálogo/POS y calcula conversiones automáticas
     entre la unidad de medida de la factura DIAN y la unidad de venta del producto en POS.
-    Optimizado con búsqueda local primero y resolución concurrente asíncrona en lote.
+    Optimizado con búsqueda local primero y resolución concurrente inteligente en POS por código y descripción.
     """
     if not items:
         return
 
-    # 1. Búsqueda local ultrarrápida por código de barras o por coincidencia de nombre (SQLite WAL)
-    needed_searches: Dict[str, List[Dict[str, Any]]] = {}
+    # 1. Búsqueda local ultrarrápida (SQLite WAL) por código, alias o nombre
+    unmatched_items: List[Dict[str, Any]] = []
 
     for it in items:
-        code = it.get("codigo")
-        desc = it.get("descripcion", "")
+        code = str(it.get("codigo") or "").strip()
+        desc = str(it.get("descripcion") or "").strip()
         matched = None
 
-        # A. Búsqueda por código de barras (código principal o número adicional)
+        # A. Búsqueda local por código de barras (código principal o número adicional)
         if code:
             local_p = database.get_product_by_barcode(code)
             if local_p:
                 matched = {
                     "item_id": str(local_p["id"]),
                     "barcode": local_p.get("item_number") or code,
+                    "item_number": local_p.get("item_number") or code,
                     "name": local_p["name"],
                     "category": local_p.get("category", ""),
-                    "cost_price": local_p.get("cost_price", 0.0),
-                    "sale_price": local_p.get("unit_price", 0.0),
+                    "cost_price": float(local_p.get("cost_price", 0.0) or 0.0),
+                    "sale_price": float(local_p.get("unit_price", 0.0) or 0.0),
+                    "unit_price": float(local_p.get("unit_price", 0.0) or 0.0),
                     "formatted_sale_price": local_p.get("formatted_sale_price", ""),
                     "stock": str(local_p.get("stock_quantity", 0)),
                     "unit_code": local_p.get("unit_code", "UN"),
-                    "match_type": "exact_code"
+                    "match_type": "local_code"
                 }
 
-        # B. Si no hubo match por código, buscar localmente en catálogo por nombre
+        # B. Búsqueda local por alias aprendido previamente
+        if not matched and desc:
+            alias = database.get_product_alias(desc)
+            if alias and alias.get("barcode"):
+                p_alias = database.get_product_by_barcode(alias["barcode"])
+                if p_alias:
+                    matched = {
+                        "item_id": str(p_alias["id"]),
+                        "barcode": p_alias.get("item_number") or alias["barcode"],
+                        "item_number": p_alias.get("item_number") or alias["barcode"],
+                        "name": p_alias["name"],
+                        "category": p_alias.get("category", ""),
+                        "cost_price": float(p_alias.get("cost_price", 0.0) or 0.0),
+                        "sale_price": float(p_alias.get("unit_price", 0.0) or 0.0),
+                        "unit_price": float(p_alias.get("unit_price", 0.0) or 0.0),
+                        "formatted_sale_price": p_alias.get("formatted_sale_price", ""),
+                        "stock": str(p_alias.get("stock_quantity", 0)),
+                        "unit_code": p_alias.get("unit_code", "UN"),
+                        "match_type": "alias"
+                    }
+
+        # C. Búsqueda local por nombre en catálogo
         if not matched and desc:
             local_by_name = database.get_product_by_name(desc)
             if local_by_name:
                 matched = {
                     "item_id": str(local_by_name["id"]),
                     "barcode": local_by_name.get("item_number") or "",
+                    "item_number": local_by_name.get("item_number") or "",
                     "name": local_by_name["name"],
                     "category": local_by_name.get("category", ""),
-                    "cost_price": local_by_name.get("cost_price", 0.0),
-                    "sale_price": local_by_name.get("unit_price", 0.0),
+                    "cost_price": float(local_by_name.get("cost_price", 0.0) or 0.0),
+                    "sale_price": float(local_by_name.get("unit_price", 0.0) or 0.0),
+                    "unit_price": float(local_by_name.get("unit_price", 0.0) or 0.0),
                     "formatted_sale_price": local_by_name.get("formatted_sale_price", ""),
                     "stock": str(local_by_name.get("stock_quantity", 0)),
                     "unit_code": local_by_name.get("unit_code", "UN"),
-                    "match_type": "name_match"
+                    "match_type": "local_name"
                 }
 
         it["matched_pos_item"] = matched
+        if not matched:
+            unmatched_items.append(it)
 
-        # Si aún no hubo match, agrupar para búsqueda en POS
-        if not matched and desc:
-            search_term = " ".join(desc.split()[:2]).strip()
-            if search_term:
-                if search_term not in needed_searches:
-                    needed_searches[search_term] = []
-                needed_searches[search_term].append(it)
+    # 2. Resolución concurrente inteligente en el sistema POS externo (csopos / softwarepos)
+    if unmatched_items:
+        pos_cache: Dict[str, List[Any]] = {}
+        sem = asyncio.Semaphore(10)
 
-    # 2. Búsqueda y resolución concurrente en paralelo para los términos únicos sin limitar a 10
-    if needed_searches:
-        unique_terms = list(needed_searches.keys())[:100]
+        async def _query_pos(q: str):
+            clean_q = q.strip()
+            if not clean_q or clean_q in pos_cache:
+                return
+            async with sem:
+                try:
+                    res = await asyncio.wait_for(pos_service.search_products(clean_q), timeout=4.0)
+                    pos_cache[clean_q] = res.items if res and res.items else []
+                except Exception:
+                    pos_cache[clean_q] = []
 
-        async def _search_term(term: str):
-            try:
-                pos_search = await asyncio.wait_for(pos_service.search_products(term), timeout=3.0)
-                if pos_search and pos_search.items:
-                    first_match = pos_search.items[0].model_dump()
-                    # Normalizar campos para compatibilidad completa con frontend
-                    first_match["unit_price"] = first_match.get("sale_price", 0.0)
-                    first_match["item_number"] = first_match.get("barcode", "")
-                    return term, first_match
-            except Exception:
-                pass
-            return term, None
+        # Fase A: Consultas concurrentes prioritarias por CÓDIGO en POS
+        unique_codes = list({
+            str(it.get("codigo") or "").strip()
+            for it in unmatched_items
+            if str(it.get("codigo") or "").strip() and len(str(it.get("codigo") or "").strip()) >= 2
+        })
+        if unique_codes:
+            await asyncio.gather(*[_query_pos(c) for c in unique_codes], return_exceptions=True)
 
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*[_search_term(t) for t in unique_terms], return_exceptions=True),
-                timeout=4.0
-            )
-            for res in results:
-                if isinstance(res, tuple):
-                    term, matched_data = res
-                    if matched_data:
-                        for it in needed_searches.get(term, []):
-                            if not it.get("matched_pos_item"):
-                                it["matched_pos_item"] = matched_data
-        except Exception:
-            pass
+        # Evaluar matches por código usando similitud para evitar colisiones de PLU numérico
+        still_unmatched = []
+        for it in unmatched_items:
+            code = str(it.get("codigo") or "").strip()
+            desc = str(it.get("descripcion") or "").strip()
+            candidates = pos_cache.get(code, []) if code else []
+
+            best_cand = None
+            best_score = -1.0
+
+            for cand in candidates:
+                cand_barcode = str(cand.barcode or "").strip()
+                sim = _compute_product_similarity(desc, cand.name)
+                t_cand = _clean_product_tokens(cand.name)
+                t_desc = _clean_product_tokens(desc)
+                matched_words, _ = _token_match_metrics(t_desc, t_cand)
+
+                cand_score = sim
+                if code and cand_barcode == code:
+                    if matched_words >= 1 and sim >= 0.15:
+                        cand_score += 0.6
+                    else:
+                        cand_score = 0.0  # Posible colisión de PLU numérico interno no relacionado
+                elif code:
+                    if matched_words >= 1:
+                        cand_score += 0.4
+                    else:
+                        cand_score = sim + 0.1
+
+                if cand_score > best_score:
+                    best_score = cand_score
+                    best_cand = cand
+
+            if best_cand and best_score >= 0.30:
+                sale_val = float(best_cand.sale_price or 0.0)
+                it["matched_pos_item"] = {
+                    "item_id": str(best_cand.item_id),
+                    "barcode": best_cand.barcode or best_cand.item_id,
+                    "item_number": best_cand.barcode or best_cand.item_id,
+                    "name": best_cand.name,
+                    "category": best_cand.category or "",
+                    "cost_price": float(best_cand.cost_price or 0.0),
+                    "sale_price": sale_val,
+                    "unit_price": sale_val,
+                    "formatted_sale_price": best_cand.formatted_sale_price or f"${int(sale_val):,}",
+                    "stock": str(best_cand.stock or "0"),
+                    "unit_code": best_cand.unit_code or "UN",
+                    "match_type": "pos_code"
+                }
+            else:
+                still_unmatched.append(it)
+
+        # Fase B: Para ítems sin match por código, buscar por términos significativos de la descripción
+        if still_unmatched:
+            desc_queries = set()
+            for it in still_unmatched:
+                desc = str(it.get("descripcion") or "").strip()
+                words = [w for w in _clean_product_tokens(desc) if len(w) >= 3 and not w.isdigit()]
+                if words:
+                    desc_queries.add(words[0])
+                    if len(words) >= 2:
+                        desc_queries.add(f"{words[0]} {words[1]}")
+
+            if desc_queries:
+                await asyncio.gather(*[_query_pos(q) for q in desc_queries if q not in pos_cache], return_exceptions=True)
+
+            for it in still_unmatched:
+                desc = str(it.get("descripcion") or "").strip()
+                words = [w for w in _clean_product_tokens(desc) if len(w) >= 3 and not w.isdigit()]
+                cand_pool: List[Any] = []
+                for q_cand in [words[0] if words else "", f"{words[0]} {words[1]}" if len(words) >= 2 else ""]:
+                    if q_cand and q_cand in pos_cache:
+                        cand_pool.extend(pos_cache[q_cand])
+
+                seen_ids = set()
+                uniq_candidates = []
+                for c in cand_pool:
+                    if c.item_id not in seen_ids:
+                        seen_ids.add(c.item_id)
+                        uniq_candidates.append(c)
+
+                best_cand = None
+                best_score = -1.0
+                for cand in uniq_candidates:
+                    sim = _compute_product_similarity(desc, cand.name)
+                    t_cand = _clean_product_tokens(cand.name)
+                    t_desc = _clean_product_tokens(desc)
+                    matched_words, _ = _token_match_metrics(t_desc, t_cand)
+                    if matched_words >= 1:
+                        score = sim + 0.1
+                        if score > best_score:
+                            best_score = score
+                            best_cand = cand
+
+                if best_cand and best_score >= 0.35:
+                    sale_val = float(best_cand.sale_price or 0.0)
+                    it["matched_pos_item"] = {
+                        "item_id": str(best_cand.item_id),
+                        "barcode": best_cand.barcode or best_cand.item_id,
+                        "item_number": best_cand.barcode or best_cand.item_id,
+                        "name": best_cand.name,
+                        "category": best_cand.category or "",
+                        "cost_price": float(best_cand.cost_price or 0.0),
+                        "sale_price": sale_val,
+                        "unit_price": sale_val,
+                        "formatted_sale_price": best_cand.formatted_sale_price or f"${int(sale_val):,}",
+                        "stock": str(best_cand.stock or "0"),
+                        "unit_code": best_cand.unit_code or "UN",
+                        "match_type": "pos_keyword"
+                    }
 
     # 3. Metadatos DIAN y conversiones de unidades normalizadas
     for it in items:
